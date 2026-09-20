@@ -15,6 +15,48 @@ from app.schemas.recipe import (
     RecipeStepsRequest,
 )
 
+from app.schemas.ingredient import ALLOWED_UNITS
+
+UNIT_NORMALIZATION = {
+    "tablespoon": ("milliliters", 15),
+    "tablespoons": ("milliliters", 15),
+    "cucharada": ("milliliters", 15),
+    "cucharadas": ("milliliters", 15),
+    "teaspoon": ("grams", 5),
+    "teaspoons": ("grams", 5),
+    "cucharadita": ("grams", 5),
+    "cucharaditas": ("grams", 5),
+    "pinch": ("grams", 1),
+    "pizca": ("grams", 1),
+    "cup": ("milliliters", 240),
+    "cups": ("milliliters", 240),
+    "taza": ("milliliters", 240),
+    "tazas": ("milliliters", 240),
+    "ounce": ("grams", 28),
+    "ounces": ("grams", 28),
+    "oz": ("grams", 28),
+    "pound": ("grams", 454),
+    "pounds": ("grams", 454),
+    "lb": ("grams", 454),
+    "lbs": ("grams", 454),
+}
+
+def sanitize_recipe_ingredient(item: dict) -> dict:
+    if not isinstance(item, dict):
+        return item
+    u = str(item.get("unit", "")).lower().strip()
+    qty = item.get("quantity")
+    if u in UNIT_NORMALIZATION:
+        mapped_unit, factor = UNIT_NORMALIZATION[u]
+        item["unit"] = mapped_unit
+        if isinstance(qty, (int, float)):
+            item["quantity"] = round(qty * factor, 1)
+    elif u not in ALLOWED_UNITS:
+        item["unit"] = "units"
+    if isinstance(qty, (int, float)) and qty <= 0:
+        item["quantity"] = 1
+    return item
+
 logger = logging.getLogger(__name__)
 
 
@@ -105,6 +147,8 @@ Restricciones:
 - Enfoque culinario: {req.focus}.
 {difficulty_clause}
 - matchScore: Porcentaje entero entre 60 y 100 según ingredientes disponibles.
+- Unidades permitidas para 'unit': ÚNICAMENTE 'units', 'grams', 'kilograms', 'milliliters', 'liters', 'package', 'unknown'.
+- PROHIBIDO usar tablespoons, teaspoons, pinch, cups, cucharadas ni pizcas. Para aceites o líquidos usa milliliters (ej. 30 milliliters en vez de 2 tablespoons); para especias o polvos usa grams o package (ej. 5 grams en vez de 1 teaspoon); para piezas enteras usa units.
 - IMPORTANTE: No generes pasos de preparación en esta fase para optimizar la velocidad de respuesta. Deja el arreglo "steps" vacío [].
 
 Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
@@ -121,7 +165,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
         {{"id": "av-1", "name": "Nombre ingrediente", "quantity": 1, "unit": "units", "isAvailable": true, "isOptional": false, "substitutions": []}}
       ],
       "missingIngredients": [
-        {{"id": "ms-1", "name": "Aceite de oliva o sal", "quantity": 1, "unit": "package", "isAvailable": false, "isOptional": true, "substitutions": ["Mantequilla"]}}
+        {{"id": "ms-1", "name": "Aceite de oliva", "quantity": 30, "unit": "milliliters", "isAvailable": false, "isOptional": true, "substitutions": ["Mantequilla"]}}
       ],
       "steps": []
     }}
@@ -173,6 +217,8 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
 
             parsed_recipes: List[RecipeResponse] = []
             for item in recipe_list[:count]:
+                raw_available = item.get("availableIngredients", [])
+                raw_missing = item.get("missingIngredients", [])
                 rec = RecipeResponse(
                     id=f"rec-ai-{uuid.uuid4().hex[:6]}",
                     title=str(item.get("title", "Receta sugerida")).strip(),
@@ -181,8 +227,8 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
                     servings=int(item.get("servings", 2)),
                     difficulty=item.get("difficulty", "easy"),
                     matchScore=int(item.get("matchScore", 90)),
-                    availableIngredients=item.get("availableIngredients", []),
-                    missingIngredients=item.get("missingIngredients", []),
+                    availableIngredients=[sanitize_recipe_ingredient(i) for i in raw_available] if isinstance(raw_available, list) else [],
+                    missingIngredients=[sanitize_recipe_ingredient(i) for i in raw_missing] if isinstance(raw_missing, list) else [],
                     steps=[],
                     isSaved=False,
                     isPrepared=False,
