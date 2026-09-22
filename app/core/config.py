@@ -21,6 +21,23 @@ class Settings:
     API_V1_STR: str = "/api/v1"
     CORS_ORIGINS: List[str] = ["*"]
 
+    # Security & Auth
+    JWT_SECRET: str = os.getenv("JWT_SECRET", "food-ai-secret-key-change-in-production-123456")
+    JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
+    JWT_EXPIRATION_SECONDS: int = int(os.getenv("JWT_EXPIRATION_SECONDS", str(60 * 60 * 24 * 7)))
+
+    # Database
+    DATABASE_PATH: str = os.getenv(
+        "DATABASE_PATH",
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "app.db"),
+    )
+    # Supabase (Si está configurado, la base de datos se conecta a la nube en Supabase)
+    _raw_supabase_url = os.getenv("SUPABASE_URL", "").strip().rstrip("/")
+    if _raw_supabase_url.endswith("/rest/v1"):
+        _raw_supabase_url = _raw_supabase_url[:-8].rstrip("/")
+    SUPABASE_URL: str = _raw_supabase_url
+    SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "").strip()
+
     # AI Config (DeepSeek)
     AI_PROVIDER: str = os.getenv("AI_PROVIDER", "deepseek")
     DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY") or os.getenv("GEMINI_API_KEY", "")

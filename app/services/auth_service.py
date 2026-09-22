@@ -1,6 +1,9 @@
+import datetime
+import time
 import uuid
-from typing import Dict, Optional
+from typing import Optional
 from fastapi import HTTPException, status
+from app.core.db import get_user_by_email, get_user_by_id, create_user
 from app.core.security import (
     hash_password,
     verify_password,
@@ -9,45 +12,24 @@ from app.core.security import (
 )
 from app.schemas.auth import RegisterRequest, LoginRequest, UserResponse, TokenResponse
 
-# Almacenamiento en memoria de usuarios (email -> dict con datos y password_hash)
-USERS_DB: Dict[str, dict] = {}
-
-
-import datetime
-import time
-
-def _init_demo_user():
-    demo_email = "demo@foodai.com"
-    if demo_email not in USERS_DB:
-        # Clave demo: "123456" hasheada con PBKDF2 OWASP (600,000 iteraciones)
-        USERS_DB[demo_email] = {
-            "id": "usr-demo-1",
-            "email": demo_email,
-            "name": "Chef Demo",
-            "password_hash": hash_password("123456"),
-        }
-
-_init_demo_user()
-
 
 class AuthService:
     @staticmethod
     def register(req: RegisterRequest) -> TokenResponse:
         email = req.email.strip().lower()
-        if email in USERS_DB:
+        if get_user_by_email(email):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="El correo ya se encuentra registrado.",
             )
 
         user_id = f"usr-{uuid.uuid4().hex[:8]}"
-        user_record = {
-            "id": user_id,
-            "email": email,
-            "name": req.name or "Chef de Cocina",
-            "password_hash": hash_password(req.password),
-        }
-        USERS_DB[email] = user_record
+        user_record = create_user(
+            user_id=user_id,
+            email=email,
+            name=req.name or "Chef de Cocina",
+            password_hash=hash_password(req.password),
+        )
 
         user_resp = UserResponse(
             id=user_record["id"],
@@ -64,7 +46,7 @@ class AuthService:
     @staticmethod
     def login(req: LoginRequest) -> TokenResponse:
         email = req.email.strip().lower()
-        user_record = USERS_DB.get(email)
+        user_record = get_user_by_email(email)
 
         if not user_record or not verify_password(req.password, user_record["password_hash"]):
             raise HTTPException(
@@ -94,7 +76,7 @@ class AuthService:
             )
 
         email = payload["email"]
-        user_record = USERS_DB.get(email)
+        user_record = get_user_by_email(email)
         if not user_record:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,

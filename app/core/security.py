@@ -5,11 +5,12 @@ import json
 import secrets
 import time
 from typing import Any, Dict, Optional
+from app.core.config import settings
 
-# Secreto para firma de tokens JWT (configurable vía variable de entorno)
-JWT_SECRET = "food-ai-secret-key-change-in-production-123456"
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRATION_SECONDS = 60 * 60 * 24 * 7  # 7 días
+# Parámetros JWT obtenidos desde la configuración
+JWT_SECRET = settings.JWT_SECRET
+JWT_ALGORITHM = settings.JWT_ALGORITHM
+JWT_EXPIRATION_SECONDS = settings.JWT_EXPIRATION_SECONDS
 
 
 ITERATIONS = 600_000
