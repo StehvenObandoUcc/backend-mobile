@@ -22,12 +22,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+cors_kwargs = {
+    "allow_methods": ["*"],
+    "allow_headers": ["*"],
+    "allow_credentials": True,
+}
+if "*" in settings.CORS_ORIGINS:
+    cors_kwargs["allow_origin_regex"] = r"^https?:\/\/.*$"
+else:
+    cors_kwargs["allow_origins"] = settings.CORS_ORIGINS
+
+app.add_middleware(CORSMiddleware, **cors_kwargs)
 
 app.include_router(api_router, prefix=settings.API_V1_STR)

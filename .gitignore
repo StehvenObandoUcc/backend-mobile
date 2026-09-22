@@ -32,3 +32,9 @@ htmlcov/
 .gemini/
 AGENTS.md
 CLAUDE.md
+
+# Databases
+data/
+*.db
+*.sqlite
+*.sqlite3
