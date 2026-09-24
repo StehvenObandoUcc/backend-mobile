@@ -89,13 +89,18 @@ def create_jwt_token(payload: Dict[str, Any], expires_in: int = JWT_EXPIRATION_S
 
 
 def decode_jwt_token(token: str) -> Optional[Dict[str, Any]]:
-    """Decodifica y verifica la firma y expiración de un token JWT."""
+    """Decodifica y verifica la firma, algoritmo y expiración de un token JWT."""
     try:
         parts = token.split(".")
         if len(parts) != 3:
             return None
 
         header_b64, payload_b64, sig_b64 = parts
+
+        header = json.loads(_b64url_decode(header_b64).decode("utf-8"))
+        if header.get("alg") != JWT_ALGORITHM:
+            return None
+
         signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
 
         expected_sig = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()

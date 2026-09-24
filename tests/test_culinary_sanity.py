@@ -119,3 +119,49 @@ def test_obvious_incompatible_pairs_are_rejected():
     is_valid_mayo, reason_mayo = validate_recipe_sanity(rec_mayo)
     assert is_valid_mayo is False
     assert "incompatible" in reason_mayo.lower()
+
+
+def test_single_ingredient_coherent_is_accepted():
+    # Caso 1 solo ingrediente: Huevo -> Omelette francés (plenamente coherente)
+    rec_single = RecipeResponse(
+        id="rec-single-1",
+        title="Omelette francés clásico con hierbas",
+        description="Esponjosa tortilla de huevo batido preparada a la perfección.",
+        prepTimeMinutes=10,
+        servings=1,
+        difficulty="easy",
+        matchScore=90,
+        availableIngredients=[
+            {"id": "1", "name": "Huevos", "quantity": 3, "unit": "units"},
+        ],
+        missingIngredients=[
+            {"id": "m1", "name": "Mantequilla", "quantity": 15, "unit": "grams"},
+            {"id": "m2", "name": "Sal", "quantity": 1, "unit": "grams"},
+        ],
+        steps=[],
+    )
+    is_valid, reason = validate_recipe_sanity(rec_single)
+    assert is_valid is True
+    assert reason is None
+
+
+def test_single_ingredient_incoherent_is_rejected():
+    # Caso 1 solo ingrediente disponible (Plátano), pero la receta generada es una sopa de pollo que ni lo menciona
+    rec_incoherent = RecipeResponse(
+        id="rec-single-bad",
+        title="Caldo de res con fideos",
+        description="Sopa tradicional reconfortante.",
+        prepTimeMinutes=25,
+        servings=2,
+        difficulty="medium",
+        matchScore=80,
+        availableIngredients=[
+            {"id": "1", "name": "Plátano", "quantity": 1, "unit": "units"},
+        ],
+        missingIngredients=[],
+        steps=[],
+    )
+    is_valid, reason = validate_recipe_sanity(rec_incoherent)
+    assert is_valid is False
+    assert "no integra coherentemente" in reason.lower()
+

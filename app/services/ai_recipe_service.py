@@ -95,6 +95,26 @@ def validate_recipe_sanity(recipe: RecipeResponse) -> Tuple[bool, Optional[str]]
         if all(any(term in name for name in norm_names) for term in pair):
             return False, f"Combinación incompatible detectada en ingredientes: {pair}"
 
+    # Verificación de coherencia para recetas con 1 solo ingrediente disponible ("pero no está mal aún")
+    if len(recipe.availableIngredients) == 1:
+        single_name = norm_names[0] if norm_names else ""
+        norm_title = normalize_ingredient_name(recipe.title)
+        norm_desc = normalize_ingredient_name(recipe.description)
+        # El ingrediente único debe tener sentido: debe figurar en el título o en la descripción apetitosa
+        keywords = [w for w in re.findall(r'\b\w+\b', single_name) if len(w) >= 3]
+        matches = False
+        for kw in keywords:
+            stems = [kw]
+            if kw.endswith("es") and len(kw) > 4:
+                stems.append(kw[:-2])
+            elif kw.endswith("s") and len(kw) > 3:
+                stems.append(kw[:-1])
+            if any(st in norm_title or st in norm_desc for st in stems):
+                matches = True
+                break
+        if keywords and not matches:
+            return False, f"La receta no integra coherentemente el ingrediente único seleccionado: {single_name}"
+
     return True, None
 
 
@@ -161,6 +181,17 @@ class AIRecipeService:
         else:
             focus_clause = f"- Enfoque culinario: {re.sub(r'[\r\n\t]+', ' ', req.focus)[:60].strip()}."
 
+        single_clause = ""
+        if len(req.ingredients) == 1:
+            single_name = str(req.ingredients[0].get("name", "")).strip()
+            single_clause = (
+                f"- REGLA DE INGREDIENTE ÚNICO ({single_name}): El usuario ha proporcionado un único ingrediente disponible. "
+                f"Esto es completamente válido ('no está mal aún'). La receta DEBE ser coherente y apetitosa: "
+                f"'{single_name}' debe ser el ingrediente estrella o base principal del plato. "
+                f"Debes incluir en 'missingIngredients' los complementos y básicos de cocina necesarios (aceite, sal, cebolla, ajo, hierbas u otros) "
+                f"para que la preparación sea completa, balanceada y de alta calidad culinaria."
+            )
+
         base_prompt = f"""
 Actúa como chef profesional y nutricionista. Genera EXACTAMENTE {count} recetas DIFERENTES basadas en los ingredientes del usuario.
 
@@ -177,6 +208,7 @@ Criterios de Plausibilidad y Armonía Culinaria:
    Si no existe una conexión culinaria clara, separa los ingredientes o usa solo los que combinen bien.
 3. Subconjunto Coherente: Prioriza una receta principal coherente con un subconjunto armónico de ingredientes. Si algunos ingredientes no encajan (ej. chocolate con salsa barbacoa), NO los fuerces en el mismo plato; déjalos fuera.
 4. Ingrediente Principal: Define claramente la proteína, vegetal o base del plato.
+5. Coherencia con Ingrediente Único: Si solo hay 1 ingrediente seleccionado, constrúyelo como la estrella del plato y complementa con básicos en missingIngredients.
 
 Restricciones:
 - Cantidad: EXACTAMENTE {count} receta(s).
@@ -184,6 +216,7 @@ Restricciones:
 {focus_clause}
 {difficulty_clause}
 {dietary_clause}
+{single_clause}
 - matchScore: Porcentaje entero entre 60 y 100 según ingredientes disponibles.
 - Unidades permitidas para 'unit': ÚNICAMENTE 'units', 'grams', 'kilograms', 'milliliters', 'liters', 'package', 'unknown'.
 - PROHIBIDO usar tablespoons, teaspoons, pinch, cups, cucharadas ni pizcas. Para aceites o líquidos usa milliliters (ej. 30 milliliters en vez de 2 tablespoons); para especias o polvos usa grams o package (ej. 5 grams en vez de 1 teaspoon); para piezas enteras usa units.
@@ -218,7 +251,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
 
         async def _call_deepseek(prompt_text: str) -> List[RecipeResponse]:
             payload = {
-                "model": "deepseek-chat",
+                "model": settings.DEEPSEEK_CHAT_MODEL,
                 "response_format": {"type": "json_object"},
                 "messages": [{"role": "user", "content": prompt_text}],
                 "temperature": 0.4,
@@ -361,7 +394,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "steps" conteniendo 
             "Content-Type": "application/json",
         }
         payload = {
-            "model": "deepseek-chat",
+            "model": settings.DEEPSEEK_CHAT_MODEL,
             "response_format": {"type": "json_object"},
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.5,
