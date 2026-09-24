@@ -69,18 +69,24 @@ class AuthService:
     @staticmethod
     def get_current_user_from_token(token: str) -> UserResponse:
         payload = decode_jwt_token(token)
-        if not payload or "email" not in payload:
+        if not payload or not isinstance(payload, dict):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Token inválido o expirado.",
             )
 
-        email = payload["email"]
-        user_record = get_user_by_email(email)
+        user_record = None
+        user_id = payload.get("sub")
+        if user_id:
+            user_record = get_user_by_id(user_id)
+
+        if not user_record and "email" in payload:
+            user_record = get_user_by_email(payload["email"])
+
         if not user_record:
             raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Usuario no encontrado.",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Usuario no encontrado o sesión no válida.",
             )
 
         return UserResponse(

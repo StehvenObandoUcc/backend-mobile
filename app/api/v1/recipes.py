@@ -10,8 +10,11 @@ from app.schemas.recipe import (
     RecipeStepsResponse,
 )
 from app.services.ai_recipe_service import AIRecipeService
+from app.core.config import settings
+from app.core.rate_limit import check_rate_limit, check_ai_rate_limit, get_client_ip
 
 logger = logging.getLogger(__name__)
+
 router = APIRouter()
 
 # Caché LRU en memoria de un solo proceso (Ponytail Opt 5).
@@ -94,6 +97,7 @@ async def generate_recipes(req: RecipeGenerateRequest, request: Request) -> List
         req.focus,
         req.max_prep_time,
         req.count,
+        (req.dietary_preference or "any").lower(),
     )
 
     now = time.time()
@@ -106,6 +110,9 @@ async def generate_recipes(req: RecipeGenerateRequest, request: Request) -> List
         else:
             del RECIPE_CACHE[cache_key]
 
+    client_ip = get_client_ip(request)
+    await check_ai_rate_limit(f"recipe_{client_ip}", max_per_minute=settings.MAX_CALLS_PER_MINUTE)
+    await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
     http_client = getattr(request.app.state, "http_client", None)
     recipes = await AIRecipeService.generate_recipes(req, http_client=http_client)
 
@@ -120,7 +127,11 @@ async def generate_recipes(req: RecipeGenerateRequest, request: Request) -> List
 @router.post("/recipes/steps", response_model=RecipeStepsResponse, status_code=status.HTTP_200_OK)
 async def get_recipe_steps(req: RecipeStepsRequest, request: Request) -> RecipeStepsResponse:
     """Fase 2 (Opción A Stateless): Genera los pasos detallados de preparación bajo demanda."""
+    client_ip = get_client_ip(request)
+    await check_ai_rate_limit(f"steps_{client_ip}", max_per_minute=settings.MAX_CALLS_PER_MINUTE)
+    await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
     http_client = getattr(request.app.state, "http_client", None)
     steps = await AIRecipeService.generate_recipe_steps(req, http_client=http_client)
     return RecipeStepsResponse(steps=steps)
+
 

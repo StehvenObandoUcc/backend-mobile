@@ -20,6 +20,16 @@ def test_health_check_returns_status_ok():
     assert data["service"] == "food-ai-backend"
 
 
+def test_security_headers_present():
+    """Toda respuesta debe incluir las cabeceras HTTP de seguridad configuradas."""
+    response = client.get("/api/v1/health")
+    assert response.headers.get("x-content-type-options") == "nosniff"
+    assert response.headers.get("x-frame-options") == "DENY"
+    assert response.headers.get("x-xss-protection") == "1; mode=block"
+    assert response.headers.get("referrer-policy") == "strict-origin-when-cross-origin"
+
+
+
 from unittest.mock import patch, AsyncMock
 from app.schemas.scan import ScanResponse
 from app.schemas.ingredient import IngredientItem

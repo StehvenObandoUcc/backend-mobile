@@ -250,3 +250,20 @@ def test_input_validation_and_database_rejection():
         headers=AUTH_HEADER_1,
     )
     assert bad_date.status_code == 422
+
+
+def test_inventory_requires_valid_bearer_token():
+    """Auditoría de Seguridad (S1): Peticiones anónimas o con tokens corruptos deben devolver 401 Unauthorized."""
+    # 1. Petición sin header Authorization
+    no_auth = client.get("/api/v1/inventory")
+    assert no_auth.status_code == 401
+    assert "Se requiere autenticación" in no_auth.json()["detail"]
+
+    # 2. Petición con token falso/corrupto
+    bad_token = client.get("/api/v1/inventory", headers={"Authorization": "Bearer token-falso-invalido"})
+    assert bad_token.status_code == 401
+
+    # 3. Intento de creación sin autenticación
+    no_auth_create = client.post("/api/v1/inventory", json={"name": "Alimento Anónimo"})
+    assert no_auth_create.status_code == 401
+

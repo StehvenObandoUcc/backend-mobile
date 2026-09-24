@@ -28,14 +28,23 @@ def get_supabase():
 
 # ─── SQLite Fallback (para desarrollo offline y testing) ───────────────────────
 
+import threading
+
+_local = threading.local()
+
+
 def get_connection() -> sqlite3.Connection:
-    """Crea y devuelve una conexión a la base de datos SQLite."""
-    os.makedirs(os.path.dirname(settings.DATABASE_PATH), exist_ok=True)
-    conn = sqlite3.connect(settings.DATABASE_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL;")
-    conn.execute("PRAGMA synchronous=NORMAL;")
-    conn.execute("PRAGMA foreign_keys=ON;")
+    """Devuelve la conexión SQLite reutilizable para el hilo actual evitando overhead de reconexión."""
+    conn = getattr(_local, "connection", None)
+    if conn is None:
+        os.makedirs(os.path.dirname(settings.DATABASE_PATH), exist_ok=True)
+        conn = sqlite3.connect(settings.DATABASE_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA foreign_keys=ON;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+        _local.connection = conn
     return conn
 
 
@@ -368,7 +377,7 @@ def update_ingredient(ingredient_id: str, user_id: str, updates: Dict[str, Any])
             logger.error(f"[DB] Error actualizando ingrediente en Supabase: {err}")
             raise
 
-    # SQLite
+    # SQLite: actualizar directamente y retornar merge en memoria sin re-consultar la base de datos
     set_clauses = [f"{k} = ?" for k in payload.keys()]
     values = list(payload.values())
     values.extend([ingredient_id, user_id])
@@ -384,20 +393,18 @@ def update_ingredient(ingredient_id: str, user_id: str, updates: Dict[str, Any])
         )
         conn.commit()
 
-    return get_ingredient_by_id(ingredient_id, user_id)
+    merged = dict(existing)
+    merged.update(payload)
+    return _row_to_ingredient_dict(merged)
 
 
 def delete_ingredient(ingredient_id: str, user_id: str) -> bool:
-    """Elimina físicamente un alimento de la base de datos verificando pertenencia."""
-    existing = get_ingredient_by_id(ingredient_id, user_id)
-    if not existing:
-        return False
-
+    """Elimina físicamente un alimento de la base de datos verificando pertenencia sin SELECT previo."""
     sb = get_supabase()
     if sb:
         try:
             res = sb.table("ingredients").delete().eq("id", ingredient_id).eq("user_id", user_id).execute()
-            return True
+            return len(res.data) > 0 if res.data is not None else True
         except Exception as err:
             logger.error(f"[DB] Error eliminando ingrediente en Supabase: {err}")
             raise
@@ -452,7 +459,3 @@ def reset_db():
         conn.execute("DELETE FROM ingredients;")
         conn.execute("DELETE FROM users WHERE email != 'demo@foodai.com';")
         conn.commit()
-
-
-# Inicialización al importar el módulo
-init_db()

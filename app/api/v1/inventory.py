@@ -13,15 +13,26 @@ router = APIRouter(prefix="/inventory", tags=["inventory"])
 
 
 def get_current_user_id(authorization: Optional[str] = Header(None)) -> str:
-    """Extrae el ID del usuario desde el Bearer token JWT, o usa usr-demo-1 por defecto."""
-    if authorization and authorization.startswith("Bearer "):
-        token = authorization.split("Bearer ")[1].strip()
-        try:
-            user = AuthService.get_current_user_from_token(token)
-            return user.id
-        except Exception:
-            pass
-    return "usr-demo-1"
+    """Extrae el ID del usuario desde el Bearer token JWT de forma estricta.
+    Lanza 401 Unauthorized si el token no existe, está expirado o es inválido."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Se requiere autenticación. Proporcione un token Bearer válido en el encabezado Authorization.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    token = authorization.split("Bearer ")[1].strip()
+    try:
+        user = AuthService.get_current_user_from_token(token)
+        return user.id
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token de autenticación inválido o expirado.",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
 
 
 @router.get("", response_model=List[IngredientItem], status_code=status.HTTP_200_OK)

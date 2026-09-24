@@ -22,9 +22,14 @@ class Settings:
     CORS_ORIGINS: List[str] = ["*"]
 
     # Security & Auth
-    JWT_SECRET: str = os.getenv("JWT_SECRET", "food-ai-secret-key-change-in-production-123456")
+    DEFAULT_INSECURE_SECRET: str = "food-ai-secret-key-change-in-production-123456"
+    JWT_SECRET: str = os.getenv("JWT_SECRET", DEFAULT_INSECURE_SECRET)
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     JWT_EXPIRATION_SECONDS: int = int(os.getenv("JWT_EXPIRATION_SECONDS", str(60 * 60 * 24 * 7)))
+
+    def is_production_secure(self) -> bool:
+        """Verifica si la configuración de seguridad es apta para producción."""
+        return self.JWT_SECRET != self.DEFAULT_INSECURE_SECRET and len(self.JWT_SECRET) >= 32
 
     # Database
     DATABASE_PATH: str = os.getenv(
@@ -44,7 +49,8 @@ class Settings:
     DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
     DEEPSEEK_BASE_URL: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
     DEEPSEEK_TIMEOUT_SECONDS: float = float(os.getenv("DEEPSEEK_TIMEOUT_SECONDS", "45"))
-    MAX_CALLS_PER_MINUTE: int = int(os.getenv("MAX_CALLS_PER_MINUTE", "10"))
+    MAX_CALLS_PER_MINUTE: int = int(os.getenv("MAX_CALLS_PER_MINUTE", "5"))
 
 
 settings = Settings()
+

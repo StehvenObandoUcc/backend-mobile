@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import unicodedata
 import uuid
 from typing import List, Optional, Tuple
@@ -108,12 +109,21 @@ class AIRecipeService:
         Los pasos se cargan bajo demanda en la Fase 2 cuando el usuario abre una receta específica.
         Incluye validación de coherencia culinaria y reintento correctivo único ante inconsistencias.
         """
+        if not settings.DEEPSEEK_API_KEY:
+            logger.error("[AIRecipeService] DEEPSEEK_API_KEY no está configurada en las variables de entorno.")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="El servicio de generación con IA no está configurado en el servidor.",
+            )
+
+
         await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
+
 
         ingredients_desc = ", ".join(
             [
-                f"{item.get('name')} ({item.get('quantity', '')} {item.get('unit', '')})".strip()
-                for item in req.ingredients
+                f"{str(item.get('name', ''))[:60]} ({str(item.get('quantity', ''))[:10]} {str(item.get('unit', ''))[:15]})".strip()
+                for item in req.ingredients[:30]
                 if item.get("name")
             ]
         )
@@ -123,6 +133,33 @@ class AIRecipeService:
             if req.difficulty and req.difficulty != "any"
             else "- Dificultad: adaptar a los ingredientes (easy o medium)"
         )
+        dietary_clause = ""
+        if req.dietary_preference and req.dietary_preference.lower() != "any":
+            pref = req.dietary_preference.lower()
+            if pref == "vegetarian":
+                dietary_clause = "- Regla dietaria OBLIGATORIA: La receta debe ser 100% VEGETARIANA (prohibido incluir res, cerdo, pollo, pavo, pescados o mariscos)."
+            elif pref == "vegan":
+                dietary_clause = "- Regla dietaria OBLIGATORIA: La receta debe ser 100% VEGANA (estrictamente de origen vegetal; prohibido carnes, pescados, lácteos, quesos, mantequilla, huevos y miel)."
+            elif pref in ("keto", "low_carb"):
+                dietary_clause = "- Regla dietaria OBLIGATORIA: Enfoque CETOGÉNICO / LOW-CARB (bajo en carbohidratos, priorizar grasas saludables y proteínas, sin pastas, harinas ni azúcares añadidos)."
+            elif pref == "gluten_free":
+                dietary_clause = "- Regla dietaria OBLIGATORIA: 100% LIBRE DE GLUTEN (prohibido usar trigo, cebada, centeno ni derivados con gluten)."
+
+        # Construcción descriptiva del enfoque culinario
+        focus_lower = (req.focus or "waste_reduction").strip().lower()
+        if focus_lower == "waste_reduction":
+            focus_clause = "- Enfoque culinario: CERO DESPERDICIO (Priorizar ingredientes próximos a caducar para aprovecharlos al máximo)."
+        elif focus_lower == "quick":
+            focus_clause = "- Enfoque culinario: RÁPIDA Y EXPRESS (Platos prácticos, sencillos, con pocos utensilios y menor tiempo de preparación)."
+        elif focus_lower.startswith("custom"):
+            custom_note = req.focus.split(":", 1)[1].strip() if ":" in req.focus else ""
+            custom_note_clean = re.sub(r'[\r\n\t]+', ' ', custom_note)[:60].strip()
+            focus_clause = (
+                f"- Enfoque culinario: PERSONALIZADA Y CREATIVA (Libertad gastronómica total con los ingredientes elegidos"
+                f"{f', indicación del comensal: {custom_note_clean}' if custom_note_clean else ''})."
+            )
+        else:
+            focus_clause = f"- Enfoque culinario: {re.sub(r'[\r\n\t]+', ' ', req.focus)[:60].strip()}."
 
         base_prompt = f"""
 Actúa como chef profesional y nutricionista. Genera EXACTAMENTE {count} recetas DIFERENTES basadas en los ingredientes del usuario.
@@ -144,8 +181,9 @@ Criterios de Plausibilidad y Armonía Culinaria:
 Restricciones:
 - Cantidad: EXACTAMENTE {count} receta(s).
 - Tiempo máximo de preparación: {req.max_prep_time} minutos.
-- Enfoque culinario: {req.focus}.
+{focus_clause}
 {difficulty_clause}
+{dietary_clause}
 - matchScore: Porcentaje entero entre 60 y 100 según ingredientes disponibles.
 - Unidades permitidas para 'unit': ÚNICAMENTE 'units', 'grams', 'kilograms', 'milliliters', 'liters', 'package', 'unknown'.
 - PROHIBIDO usar tablespoons, teaspoons, pinch, cups, cucharadas ni pizcas. Para aceites o líquidos usa milliliters (ej. 30 milliliters en vez de 2 tablespoons); para especias o polvos usa grams o package (ej. 5 grams en vez de 1 teaspoon); para piezas enteras usa units.
@@ -286,7 +324,15 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
         http_client: Optional[httpx.AsyncClient] = None,
     ) -> List[str]:
         """Fase 2: Genera los pasos detallados de preparación exclusivamente cuando el usuario abre la receta."""
+        if not settings.DEEPSEEK_API_KEY:
+            logger.error("[AIRecipeService] DEEPSEEK_API_KEY no está configurada en las variables de entorno.")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="El servicio de generación con IA no está configurado en el servidor.",
+            )
+
         await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
+
 
         available_desc = ", ".join([ing.get("name", "") for ing in req.availableIngredients if ing.get("name")])
         missing_desc = ", ".join([ing.get("name", "") for ing in req.missingIngredients if ing.get("name")])

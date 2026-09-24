@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import ValidationError
 
 from app.core.config import settings
-from app.core.rate_limit import check_rate_limit
+from app.core.rate_limit import check_rate_limit, check_ai_rate_limit, get_client_ip
 from app.schemas.scan import ScanResponse
 from app.schemas.ingredient import IngredientItem
 
@@ -29,9 +29,17 @@ async def _run_deepseek_vision(
     http_client: Optional[httpx.AsyncClient] = None,
 ) -> ScanResponse:
     """Invoca la API multimodal de DeepSeek Flash para analizar alimentos en una imagen."""
+    if not settings.DEEPSEEK_API_KEY:
+        logger.error("[Scan] DEEPSEEK_API_KEY no está configurada en las variables de entorno.")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="El servicio de análisis con IA no está configurado en el servidor.",
+        )
+
     clean_mime = mime_type if mime_type in ALLOWED_IMAGE_TYPES else "image/jpeg"
     if "," in b64_image:
         b64_image = b64_image.split(",", 1)[1]
+
 
     # Prompt condensado: sin relleno conversacional, preservando reglas morfológicas y de confianza
     prompt = (
@@ -173,9 +181,24 @@ async def _run_deepseek_vision(
 
 @router.post("/scan", response_model=ScanResponse, status_code=status.HTTP_200_OK)
 async def scan_image(request: Request) -> ScanResponse:
-    """Recibe una imagen (JSON base64 o Multipart FormData) y procesa los alimentos con DeepSeek Flash."""
-    # Control de tasa de llamadas para proteger el saldo
+    # Control de tasa por cliente/IP y global para proteger contra abusos en fase de pruebas (máximo 5 llamadas/min)
+    client_ip = get_client_ip(request)
+    await check_ai_rate_limit(f"scan_{client_ip}", max_per_minute=settings.MAX_CALLS_PER_MINUTE)
     await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
+
+
+    MAX_IMAGE_PAYLOAD_BYTES = 10 * 1024 * 1024  # 10 MB
+
+    content_length = request.headers.get("content-length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_IMAGE_PAYLOAD_BYTES:
+                raise HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="La imagen enviada excede el tamaño máximo permitido de 10 MB.",
+                )
+        except ValueError:
+            pass
 
     content_type = request.headers.get("content-type", "").lower()
     b64_image = ""
@@ -193,11 +216,19 @@ async def scan_image(request: Request) -> ScanResponse:
             form = await request.form()
             upload = form.get("image")
             if upload and hasattr(upload, "read"):
-                file_bytes = await upload.read()
+                file_bytes = await upload.read(MAX_IMAGE_PAYLOAD_BYTES + 1)
+                if len(file_bytes) > MAX_IMAGE_PAYLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        detail="El archivo excede el tamaño máximo permitido de 10 MB.",
+                    )
                 b64_image = base64.b64encode(file_bytes).decode("utf-8")
                 mime_type = getattr(upload, "content_type", "image/jpeg")
+        except HTTPException:
+            raise
         except Exception as exc:
-            raise HTTPException(status_code=400, detail=f"Error leyendo multipart: {exc}")
+            logger.error(f"[Scan] Error procesando payload multipart: {exc}")
+            raise HTTPException(status_code=400, detail="Error al procesar el archivo multipart.")
     else:
         try:
             body = await request.json()
@@ -213,6 +244,12 @@ async def scan_image(request: Request) -> ScanResponse:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No se encontró imagen en la solicitud. Envíe 'image_base64' o campo 'image'.",
+        )
+
+    if len(b64_image) > int(MAX_IMAGE_PAYLOAD_BYTES * 1.4):
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="La imagen en base64 excede el tamaño máximo permitido de 10 MB.",
         )
 
     http_client = getattr(request.app.state, "http_client", None)
