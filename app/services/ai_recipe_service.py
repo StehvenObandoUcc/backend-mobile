@@ -73,7 +73,30 @@ INCOMPATIBLE_PAIRS = [
     {"chocolate", "barbacoa"},
     {"chocolate", "mayonesa"},
     {"chocolate", "ketchup"},
+    # Incompatibilidades de bebidas comerciales con carnes/pescados/sofrito
+    {"malta", "pollo"},
+    {"malta", "carne"},
+    {"malta", "res"},
+    {"malta", "pescado"},
+    {"malta", "ajo"},
+    {"malta", "cebolla"},
+    {"pony malta", "pollo"},
+    {"pony malta", "carne"},
+    {"pony malta", "res"},
+    {"pony malta", "pescado"},
+    {"gaseosa", "pollo"},
+    {"gaseosa", "carne"},
+    {"gaseosa", "pescado"},
+    {"refresco", "pollo"},
+    {"soda", "pollo"},
+    {"chocolate", "pollo"},
+    {"chocolate", "ajo"},
+    {"chocolate", "cebolla"},
+    {"caramelo", "pescado"},
 ]
+
+COMMERCIAL_BEVERAGES = ["malta", "pony malta", "gaseosa", "refresco", "soda", "coca cola", "pepsi", "sprite", "fanta", "jugo en caja", "cerveza"]
+SAVORY_MAINS = ["pollo", "carne", "res", "pescado", "cerdo", "pavo", "marisco"]
 
 
 def validate_recipe_sanity(recipe: RecipeResponse) -> Tuple[bool, Optional[str]]:
@@ -94,6 +117,13 @@ def validate_recipe_sanity(recipe: RecipeResponse) -> Tuple[bool, Optional[str]]
     for pair in INCOMPATIBLE_PAIRS:
         if all(any(term in name for name in norm_names) for term in pair):
             return False, f"Combinación incompatible detectada en ingredientes: {pair}"
+
+    # Verificación estricta: ninguna bebida comercial debe cocinarse con carnes o pescados salados
+    for bev in COMMERCIAL_BEVERAGES:
+        if any(bev in name for name in norm_names):
+            for sav in SAVORY_MAINS:
+                if any(sav in name for name in norm_names):
+                    return False, f"Combinación incoherente: bebida comercial ('{bev}') cocinada con plato salado ('{sav}')"
 
     # Verificación de coherencia para recetas con 1 solo ingrediente disponible ("pero no está mal aún")
     if len(recipe.availableIngredients) == 1:
@@ -207,8 +237,12 @@ Criterios de Plausibilidad y Armonía Culinaria:
    - El resultado sería apetitoso para un comensal común.
    Si no existe una conexión culinaria clara, separa los ingredientes o usa solo los que combinen bien.
 3. Subconjunto Coherente: Prioriza una receta principal coherente con un subconjunto armónico de ingredientes. Si algunos ingredientes no encajan (ej. chocolate con salsa barbacoa), NO los fuerces en el mismo plato; déjalos fuera.
-4. Ingrediente Principal: Define claramente la proteína, vegetal o base del plato.
-5. Coherencia con Ingrediente Único: Si solo hay 1 ingrediente seleccionado, constrúyelo como la estrella del plato y complementa con básicos en missingIngredients.
+4. Regla Estricta de Bebidas Comerciales y Dulces:
+   - Las bebidas comerciales (como Pony Malta, malta, gaseosas, refrescos, sodas, colas, jugos en caja) y golosinas/dulces son para consumo directo o acompañamiento.
+   - NUNCA uses bebidas comerciales como ingrediente de cocción en preparaciones calientes saladas (como pollo, res, pescado, guisos, o platos con ajo y cebolla). NUNCA inventes 'pollo a la malta' o platos bizarros. Déjalas FUERA de la preparación caliente.
+5. Ingrediente Principal: Define claramente la proteína, vegetal o base del plato.
+6. Coherencia con Ingrediente Único: Si solo hay 1 ingrediente seleccionado, constrúyelo como la estrella del plato y complementa con básicos en missingIngredients.
+7. Variedad Gastronómica: Proporciona recetas creativas y variadas con diferentes técnicas (salteado, horneado, guisado, ensalada tibia, sopa/crema).
 
 Restricciones:
 - Cantidad: EXACTAMENTE {count} receta(s).
@@ -254,7 +288,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
                 "model": settings.DEEPSEEK_CHAT_MODEL,
                 "response_format": {"type": "json_object"},
                 "messages": [{"role": "user", "content": prompt_text}],
-                "temperature": 0.4,
+                "temperature": 0.7,
                 "max_tokens": 1500,
             }
 

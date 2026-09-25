@@ -165,3 +165,46 @@ def test_single_ingredient_incoherent_is_rejected():
     assert is_valid is False
     assert "no integra coherentemente" in reason.lower()
 
+
+def test_commercial_beverages_with_savory_are_rejected():
+    # Bug 6.2: Caso reportado "Pony Malta" combinada con pollo
+    rec_pony_malta = RecipeResponse(
+        id="rec-pony-pollo",
+        title="Pollo salteado con Pony Malta",
+        description="Pechuga de pollo cocinada en reducción de Pony Malta.",
+        prepTimeMinutes=20,
+        servings=2,
+        difficulty="easy",
+        matchScore=90,
+        availableIngredients=[
+            {"id": "1", "name": "Pechuga de pollo", "quantity": 400, "unit": "grams"},
+            {"id": "2", "name": "Pony Malta", "quantity": 1, "unit": "units"},
+            {"id": "3", "name": "Cebolla", "quantity": 1, "unit": "units"},
+        ],
+        missingIngredients=[],
+        steps=[],
+    )
+    is_valid, reason = validate_recipe_sanity(rec_pony_malta)
+    assert is_valid is False
+    assert "incoherente" in reason.lower() or "incompatible" in reason.lower()
+
+    # Gaseosa con pescado
+    rec_soda_fish = RecipeResponse(
+        id="rec-soda-fish",
+        title="Filete de pescado a la gaseosa",
+        description="Pescado bañado en gaseosa.",
+        prepTimeMinutes=15,
+        servings=1,
+        difficulty="easy",
+        matchScore=85,
+        availableIngredients=[
+            {"id": "1", "name": "Pescado", "quantity": 200, "unit": "grams"},
+            {"id": "2", "name": "Gaseosa", "quantity": 1, "unit": "units"},
+        ],
+        missingIngredients=[],
+        steps=[],
+    )
+    is_valid_soda, reason_soda = validate_recipe_sanity(rec_soda_fish)
+    assert is_valid_soda is False
+
+
