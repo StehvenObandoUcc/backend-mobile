@@ -1,5 +1,5 @@
 from typing import List, Optional
-from fastapi import APIRouter, Header, HTTPException, status, Depends
+from fastapi import APIRouter, Header, HTTPException, status, Depends, Response
 from app.schemas.shopping import (
     ShoppingItemSchema,
     ShoppingItemCreate,
@@ -44,11 +44,14 @@ async def list_shopping_items(user_id: str = Depends(get_current_user_id)) -> Li
 @router.post("", response_model=ShoppingItemSchema, status_code=status.HTTP_201_CREATED)
 async def add_shopping_item(
     payload: ShoppingItemCreate,
+    response: Response,
     user_id: str = Depends(get_current_user_id),
 ) -> ShoppingItemSchema:
     """Agrega y persiste un nuevo artículo en la lista de compras del usuario."""
     data = payload.model_dump(by_alias=True)
     created = db.create_shopping_item(data, user_id=user_id)
+    if created.get("_is_idempotent"):
+        response.status_code = status.HTTP_200_OK
     return ShoppingItemSchema.model_validate(created)
 
 

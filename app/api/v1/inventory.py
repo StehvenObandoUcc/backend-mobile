@@ -1,5 +1,5 @@
 from typing import List, Optional
-from fastapi import APIRouter, Header, HTTPException, status, Depends
+from fastapi import APIRouter, Header, HTTPException, status, Depends, Response
 from app.schemas.ingredient import (
     IngredientItem,
     IngredientCreate,
@@ -45,11 +45,14 @@ async def list_inventory(user_id: str = Depends(get_current_user_id)) -> List[In
 @router.post("", response_model=IngredientItem, status_code=status.HTTP_201_CREATED)
 async def add_ingredient(
     payload: IngredientCreate,
+    response: Response,
     user_id: str = Depends(get_current_user_id),
 ) -> IngredientItem:
     """Inserta un nuevo alimento en la base de datos conservando todos sus campos."""
     data = payload.model_dump(by_alias=True)
     created = db.create_ingredient(data, user_id=user_id)
+    if created.get("_is_idempotent"):
+        response.status_code = status.HTTP_200_OK
     return IngredientItem.model_validate(created)
 
 

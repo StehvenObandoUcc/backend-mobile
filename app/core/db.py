@@ -5,6 +5,7 @@ import datetime
 import json
 import uuid
 from typing import Optional, Dict, Any, List
+from fastapi import HTTPException, status
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -309,67 +310,168 @@ def get_ingredient_by_id(ingredient_id: str, user_id: str) -> Optional[Dict[str,
 
 
 def create_ingredient(item: Dict[str, Any], user_id: str) -> Dict[str, Any]:
-    """Crea y persiste un alimento en la base de datos asegurando todos sus campos."""
+    """Crea y persiste un alimento con soporte idempotente por ID y aislamiento por usuario."""
     ing_id = item.get("id") or f"ing-{uuid.uuid4().hex[:8]}"
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-    record = {
-        "id": ing_id,
-        "user_id": user_id,
-        "name": str(item.get("name", "")).strip(),
-        "category": str(item.get("category", "other")).lower(),
-        "quantity": item.get("quantity"),
-        "unit": item.get("unit"),
-        "expiration_date": item.get("expirationDate") or item.get("expiration_date"),
-        "confidence": item.get("confidence"),
-        "source": str(item.get("source", "manual")).lower(),
-        "confirmed": bool(item.get("confirmed", True)),
-        "image_uri": item.get("imageUri") or item.get("image_uri"),
-        "notes": item.get("notes"),
-        "expiration_source": item.get("expirationSource") or item.get("expiration_source", "unknown"),
-        "created_at": item.get("created_at") or now_iso,
-        "updated_at": now_iso,
-    }
+    req_name = str(item.get("name", "")).strip().lower()
 
     sb = get_supabase()
     if sb:
         try:
+            if item.get("id"):
+                existing_res = sb.table("ingredients").select("*").eq("id", ing_id).execute()
+                if existing_res.data and len(existing_res.data) > 0:
+                    existing = existing_res.data[0]
+                    if existing.get("user_id") == user_id:
+                        existing_name = str(existing.get("name", "")).strip().lower()
+                        if req_name and existing_name and req_name != existing_name:
+                            raise HTTPException(
+                                status_code=status.HTTP_409_CONFLICT,
+                                detail=f"Conflicto de payload: el ID '{ing_id}' ya existe con datos diferentes ('{existing.get('name')}'). Use PUT para modificarlo."
+                            )
+                        d = _row_to_ingredient_dict(existing)
+                        d["_is_idempotent"] = True
+                        return d
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"El recurso con ID '{ing_id}' ya pertenece a otro usuario."
+                    )
+
+            record = {
+                "id": ing_id,
+                "user_id": user_id,
+                "name": str(item.get("name", "")).strip(),
+                "category": str(item.get("category", "other")).lower(),
+                "quantity": item.get("quantity"),
+                "unit": item.get("unit"),
+                "expiration_date": item.get("expirationDate") or item.get("expiration_date"),
+                "confidence": item.get("confidence"),
+                "source": str(item.get("source", "manual")).lower(),
+                "confirmed": bool(item.get("confirmed", True)),
+                "image_uri": item.get("imageUri") or item.get("image_uri"),
+                "notes": item.get("notes"),
+                "expiration_source": item.get("expirationSource") or item.get("expiration_source", "unknown"),
+                "created_at": item.get("created_at") or now_iso,
+                "updated_at": now_iso,
+            }
+
             res = sb.table("ingredients").insert(record).execute()
             if res.data and len(res.data) > 0:
                 return _row_to_ingredient_dict(res.data[0])
             return _row_to_ingredient_dict(record)
+        except HTTPException:
+            raise
         except Exception as err:
+            err_str = str(err).lower()
+            if "duplicate key" in err_str or "23505" in err_str or "unique constraint" in err_str:
+                existing_res = sb.table("ingredients").select("*").eq("id", ing_id).execute()
+                if existing_res.data and len(existing_res.data) > 0:
+                    existing = existing_res.data[0]
+                    if existing.get("user_id") == user_id:
+                        existing_name = str(existing.get("name", "")).strip().lower()
+                        if req_name and existing_name and req_name != existing_name:
+                            raise HTTPException(
+                                status_code=status.HTTP_409_CONFLICT,
+                                detail=f"Conflicto de payload: el ID '{ing_id}' ya existe con datos diferentes ('{existing.get('name')}'). Use PUT para modificarlo."
+                            )
+                        d = _row_to_ingredient_dict(existing)
+                        d["_is_idempotent"] = True
+                        return d
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"El recurso con ID '{ing_id}' ya pertenece a otro usuario."
+                    )
             logger.error(f"[DB] Error insertando ingrediente en Supabase: {err}")
             raise
 
     with get_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO ingredients (
-                id, user_id, name, category, quantity, unit, expiration_date,
-                confidence, source, confirmed, image_uri, notes, expiration_source,
-                created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                record["id"],
-                record["user_id"],
-                record["name"],
-                record["category"],
-                record["quantity"],
-                record["unit"],
-                record["expiration_date"],
-                record["confidence"],
-                record["source"],
-                1 if record["confirmed"] else 0,
-                record["image_uri"],
-                record["notes"],
-                record["expiration_source"],
-                record["created_at"],
-                record["updated_at"],
-            ),
-        )
-        conn.commit()
+        cursor = conn.cursor()
+        if item.get("id"):
+            cursor.execute("SELECT * FROM ingredients WHERE id = ?", (ing_id,))
+            row = cursor.fetchone()
+            if row:
+                existing = dict(row)
+                if existing.get("user_id") == user_id:
+                    existing_name = str(existing.get("name", "")).strip().lower()
+                    if req_name and existing_name and req_name != existing_name:
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail=f"Conflicto de payload: el ID '{ing_id}' ya existe con datos diferentes ('{existing.get('name')}'). Use PUT para modificarlo."
+                        )
+                    d = _row_to_ingredient_dict(existing)
+                    d["_is_idempotent"] = True
+                    return d
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"El recurso con ID '{ing_id}' ya pertenece a otro usuario."
+                )
+
+        record = {
+            "id": ing_id,
+            "user_id": user_id,
+            "name": str(item.get("name", "")).strip(),
+            "category": str(item.get("category", "other")).lower(),
+            "quantity": item.get("quantity"),
+            "unit": item.get("unit"),
+            "expiration_date": item.get("expirationDate") or item.get("expiration_date"),
+            "confidence": item.get("confidence"),
+            "source": str(item.get("source", "manual")).lower(),
+            "confirmed": bool(item.get("confirmed", True)),
+            "image_uri": item.get("imageUri") or item.get("image_uri"),
+            "notes": item.get("notes"),
+            "expiration_source": item.get("expirationSource") or item.get("expiration_source", "unknown"),
+            "created_at": item.get("created_at") or now_iso,
+            "updated_at": now_iso,
+        }
+
+        try:
+            conn.execute(
+                """
+                INSERT INTO ingredients (
+                    id, user_id, name, category, quantity, unit, expiration_date,
+                    confidence, source, confirmed, image_uri, notes, expiration_source,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["id"],
+                    record["user_id"],
+                    record["name"],
+                    record["category"],
+                    record["quantity"],
+                    record["unit"],
+                    record["expiration_date"],
+                    record["confidence"],
+                    record["source"],
+                    1 if record["confirmed"] else 0,
+                    record["image_uri"],
+                    record["notes"],
+                    record["expiration_source"],
+                    record["created_at"],
+                    record["updated_at"],
+                ),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            cursor.execute("SELECT * FROM ingredients WHERE id = ?", (ing_id,))
+            row = cursor.fetchone()
+            if row:
+                existing = dict(row)
+                if existing.get("user_id") == user_id:
+                    existing_name = str(existing.get("name", "")).strip().lower()
+                    if req_name and existing_name and req_name != existing_name:
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail=f"Conflicto de payload: el ID '{ing_id}' ya existe con datos diferentes ('{existing.get('name')}'). Use PUT para modificarlo."
+                        )
+                    d = _row_to_ingredient_dict(existing)
+                    d["_is_idempotent"] = True
+                    return d
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"El recurso con ID '{ing_id}' ya pertenece a otro usuario."
+                )
+            raise
 
     return _row_to_ingredient_dict(record)
 
@@ -758,54 +860,150 @@ def get_shopping_item_by_id(item_id: str, user_id: str) -> Optional[Dict[str, An
 
 
 def create_shopping_item(item: Dict[str, Any], user_id: str) -> Dict[str, Any]:
-    """Crea y persiste un nuevo artículo en la lista de compras."""
+    """Crea y persiste un nuevo artículo en la lista de compras con soporte idempotente por ID y aislamiento."""
     item_id = item.get("id") or f"shop-{uuid.uuid4().hex[:8]}"
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
-
-    record = {
-        "id": item_id,
-        "user_id": user_id,
-        "name": str(item.get("name", "")).strip(),
-        "quantity": item.get("quantity"),
-        "unit": str(item.get("unit", "units")),
-        "category": str(item.get("category", "other")).lower(),
-        "is_bought": 1 if item.get("isBought", item.get("is_bought", False)) else 0,
-        "recipe_source": item.get("recipeSource") or item.get("recipe_source"),
-        "created_at": item.get("createdAt") or item.get("created_at") or now_iso,
-        "updated_at": now_iso,
-    }
+    req_name = str(item.get("name", "")).strip().lower()
 
     sb = get_supabase()
     if sb:
         try:
+            if item.get("id"):
+                existing_res = sb.table("shopping_items").select("*").eq("id", item_id).execute()
+                if existing_res.data and len(existing_res.data) > 0:
+                    existing = existing_res.data[0]
+                    if existing.get("user_id") == user_id:
+                        existing_name = str(existing.get("name", "")).strip().lower()
+                        if req_name and existing_name and req_name != existing_name:
+                            raise HTTPException(
+                                status_code=status.HTTP_409_CONFLICT,
+                                detail=f"Conflicto de payload: el ID '{item_id}' ya existe con datos diferentes ('{existing.get('name')}'). Use PUT para modificarlo."
+                            )
+                        d = _row_to_shopping_dict(existing)
+                        d["_is_idempotent"] = True
+                        return d
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"El artículo con ID '{item_id}' ya pertenece a otro usuario."
+                    )
+
+            record = {
+                "id": item_id,
+                "user_id": user_id,
+                "name": str(item.get("name", "")).strip(),
+                "quantity": item.get("quantity"),
+                "unit": str(item.get("unit", "units")),
+                "category": str(item.get("category", "other")).lower(),
+                "is_bought": 1 if item.get("isBought", item.get("is_bought", False)) else 0,
+                "recipe_source": item.get("recipeSource") or item.get("recipe_source"),
+                "created_at": item.get("createdAt") or item.get("created_at") or now_iso,
+                "updated_at": now_iso,
+            }
+
             res = sb.table("shopping_items").insert(record).execute()
             if res.data and len(res.data) > 0:
                 return _row_to_shopping_dict(res.data[0])
             return _row_to_shopping_dict(record)
+        except HTTPException:
+            raise
         except Exception as err:
+            err_str = str(err).lower()
+            if "duplicate key" in err_str or "23505" in err_str or "unique constraint" in err_str:
+                existing_res = sb.table("shopping_items").select("*").eq("id", item_id).execute()
+                if existing_res.data and len(existing_res.data) > 0:
+                    existing = existing_res.data[0]
+                    if existing.get("user_id") == user_id:
+                        existing_name = str(existing.get("name", "")).strip().lower()
+                        if req_name and existing_name and req_name != existing_name:
+                            raise HTTPException(
+                                status_code=status.HTTP_409_CONFLICT,
+                                detail=f"Conflicto de payload: el ID '{item_id}' ya existe con datos diferentes ('{existing.get('name')}'). Use PUT para modificarlo."
+                            )
+                        d = _row_to_shopping_dict(existing)
+                        d["_is_idempotent"] = True
+                        return d
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"El artículo con ID '{item_id}' ya pertenece a otro usuario."
+                    )
             logger.warning(f"[DB] Error insertando artículo en Supabase (fallback SQLite): {err}")
 
     with get_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO shopping_items (
-                id, user_id, name, quantity, unit, category, is_bought, recipe_source, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                record["id"],
-                record["user_id"],
-                record["name"],
-                record["quantity"],
-                record["unit"],
-                record["category"],
-                record["is_bought"],
-                record["recipe_source"],
-                record["created_at"],
-                record["updated_at"],
-            ),
-        )
-        conn.commit()
+        cursor = conn.cursor()
+        if item.get("id"):
+            cursor.execute("SELECT * FROM shopping_items WHERE id = ?", (item_id,))
+            row = cursor.fetchone()
+            if row:
+                existing = dict(row)
+                if existing.get("user_id") == user_id:
+                    existing_name = str(existing.get("name", "")).strip().lower()
+                    if req_name and existing_name and req_name != existing_name:
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail=f"Conflicto de payload: el ID '{item_id}' ya existe con datos diferentes ('{existing.get('name')}'). Use PUT para modificarlo."
+                        )
+                    d = _row_to_shopping_dict(existing)
+                    d["_is_idempotent"] = True
+                    return d
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"El artículo con ID '{item_id}' ya pertenece a otro usuario."
+                )
+
+        record = {
+            "id": item_id,
+            "user_id": user_id,
+            "name": str(item.get("name", "")).strip(),
+            "quantity": item.get("quantity"),
+            "unit": str(item.get("unit", "units")),
+            "category": str(item.get("category", "other")).lower(),
+            "is_bought": 1 if item.get("isBought", item.get("is_bought", False)) else 0,
+            "recipe_source": item.get("recipeSource") or item.get("recipe_source"),
+            "created_at": item.get("createdAt") or item.get("created_at") or now_iso,
+            "updated_at": now_iso,
+        }
+
+        try:
+            conn.execute(
+                """
+                INSERT INTO shopping_items (
+                    id, user_id, name, quantity, unit, category, is_bought, recipe_source, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record["id"],
+                    record["user_id"],
+                    record["name"],
+                    record["quantity"],
+                    record["unit"],
+                    record["category"],
+                    record["is_bought"],
+                    record["recipe_source"],
+                    record["created_at"],
+                    record["updated_at"],
+                ),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            cursor.execute("SELECT * FROM shopping_items WHERE id = ?", (item_id,))
+            row = cursor.fetchone()
+            if row:
+                existing = dict(row)
+                if existing.get("user_id") == user_id:
+                    existing_name = str(existing.get("name", "")).strip().lower()
+                    if req_name and existing_name and req_name != existing_name:
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail=f"Conflicto de payload: el ID '{item_id}' ya existe con datos diferentes ('{existing.get('name')}'). Use PUT para modificarlo."
+                        )
+                    d = _row_to_shopping_dict(existing)
+                    d["_is_idempotent"] = True
+                    return d
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"El artículo con ID '{item_id}' ya pertenece a otro usuario."
+                )
+            raise
 
     return _row_to_shopping_dict(record)
 

@@ -1,11 +1,33 @@
+import pytest
+import httpx
 from fastapi.testclient import TestClient
 from app.main import app
+from app.core.config import settings
 
 client = TestClient(app)
 
 
+def _check_deepseek_credentials() -> bool:
+    """Verifica si existen credenciales válidas y autorizadas de DeepSeek sin imprimir secretos."""
+    key = settings.DEEPSEEK_API_KEY
+    if not key or len(key) < 15:
+        return False
+    try:
+        r = httpx.get(
+            f"{settings.DEEPSEEK_BASE_URL.rstrip('/')}/models",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=3.0,
+        )
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+has_active_deepseek = _check_deepseek_credentials()
+
+
 def test_get_recipes_returns_list():
-    """GET /api/v1/recipes debe responder con HTTP 200 y una lista no vacía de recetas."""
+    """GET /api/v1/recipes debe responder con HTTP 200 y una lista no vacía de recetas (prueba local)."""
     response = client.get("/api/v1/recipes")
     assert response.status_code == 200
     data = response.json()
@@ -15,6 +37,10 @@ def test_get_recipes_returns_list():
     assert "steps" in data[0]
 
 
+@pytest.mark.skipif(
+    not has_active_deepseek,
+    reason="Requiere credenciales activas y autorizadas de DeepSeek API para pruebas de generación externa",
+)
 def test_generate_recipes_with_custom_ingredients():
     """POST /api/v1/recipes/generate debe recibir ingredientes y generar recetas con ellos."""
     payload = {
@@ -39,6 +65,10 @@ def test_generate_recipes_with_custom_ingredients():
     assert isinstance(first_recipe["steps"], list)
 
 
+@pytest.mark.skipif(
+    not has_active_deepseek,
+    reason="Requiere credenciales activas y autorizadas de DeepSeek API para pruebas de generación externa",
+)
 def test_generate_recipes_with_empty_ingredients_fallback():
     """POST /api/v1/recipes/generate con lista vacía debe generar sugerencias balanceadas sin fallar."""
     response = client.post("/api/v1/recipes/generate", json={"ingredients": []})
@@ -49,6 +79,10 @@ def test_generate_recipes_with_empty_ingredients_fallback():
     assert "title" in data[0]
 
 
+@pytest.mark.skipif(
+    not has_active_deepseek,
+    reason="Requiere credenciales activas y autorizadas de DeepSeek API para pruebas de generación externa",
+)
 def test_generate_recipes_with_dietary_preference():
     """POST /api/v1/recipes/generate debe soportar y respetar la preferencia dietaria."""
     payload = {
@@ -69,6 +103,10 @@ def test_generate_recipes_with_dietary_preference():
     assert "title" in data[0]
 
 
+@pytest.mark.skipif(
+    not has_active_deepseek,
+    reason="Requiere credenciales activas y autorizadas de DeepSeek API para pruebas de generación externa",
+)
 def test_generate_recipes_with_custom_focus():
     """POST /api/v1/recipes/generate debe soportar el enfoque culinario personalizado."""
     payload = {
