@@ -41,7 +41,7 @@ def test_get_recipes_returns_list():
     not has_active_deepseek,
     reason="Requiere credenciales activas y autorizadas de DeepSeek API para pruebas de generación externa",
 )
-def test_generate_recipes_with_custom_ingredients():
+def test_generate_recipes_with_custom_ingredients(auth_headers):
     """POST /api/v1/recipes/generate debe recibir ingredientes y generar recetas con ellos."""
     payload = {
         "ingredients": [
@@ -52,7 +52,7 @@ def test_generate_recipes_with_custom_ingredients():
         "max_prep_time": 20,
         "focus": "waste_reduction",
     }
-    response = client.post("/api/v1/recipes/generate", json=payload)
+    response = client.post("/api/v1/recipes/generate", json=payload, headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data, list)
@@ -69,9 +69,9 @@ def test_generate_recipes_with_custom_ingredients():
     not has_active_deepseek,
     reason="Requiere credenciales activas y autorizadas de DeepSeek API para pruebas de generación externa",
 )
-def test_generate_recipes_with_empty_ingredients_fallback():
+def test_generate_recipes_with_empty_ingredients_fallback(auth_headers):
     """POST /api/v1/recipes/generate con lista vacía debe generar sugerencias balanceadas sin fallar."""
-    response = client.post("/api/v1/recipes/generate", json={"ingredients": []})
+    response = client.post("/api/v1/recipes/generate", json={"ingredients": []}, headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data, list)
@@ -83,7 +83,7 @@ def test_generate_recipes_with_empty_ingredients_fallback():
     not has_active_deepseek,
     reason="Requiere credenciales activas y autorizadas de DeepSeek API para pruebas de generación externa",
 )
-def test_generate_recipes_with_dietary_preference():
+def test_generate_recipes_with_dietary_preference(auth_headers):
     """POST /api/v1/recipes/generate debe soportar y respetar la preferencia dietaria."""
     payload = {
         "ingredients": [
@@ -95,7 +95,7 @@ def test_generate_recipes_with_dietary_preference():
         "focus": "healthy",
         "dietary_preference": "vegetarian",
     }
-    response = client.post("/api/v1/recipes/generate", json=payload)
+    response = client.post("/api/v1/recipes/generate", json=payload, headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data, list)
@@ -107,7 +107,7 @@ def test_generate_recipes_with_dietary_preference():
     not has_active_deepseek,
     reason="Requiere credenciales activas y autorizadas de DeepSeek API para pruebas de generación externa",
 )
-def test_generate_recipes_with_custom_focus():
+def test_generate_recipes_with_custom_focus(auth_headers):
     """POST /api/v1/recipes/generate debe soportar el enfoque culinario personalizado."""
     payload = {
         "ingredients": [
@@ -118,7 +118,7 @@ def test_generate_recipes_with_custom_focus():
         "focus": "custom: salsa cremosa",
         "difficulty": "medium",
     }
-    response = client.post("/api/v1/recipes/generate", json=payload)
+    response = client.post("/api/v1/recipes/generate", json=payload, headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data, list)

@@ -1,8 +1,8 @@
 from collections import OrderedDict
 import logging
 import time
-from typing import List, Optional
-from fastapi import APIRouter, Header, HTTPException, Request, status, Depends
+from typing import Annotated, List, Optional
+from fastapi import APIRouter, Body, Header, HTTPException, Request, status, Depends
 from app.schemas.recipe import (
     RecipeResponse,
     RecipeGenerateRequest,
@@ -12,7 +12,7 @@ from app.schemas.recipe import (
 from app.services.ai_recipe_service import AIRecipeService
 from app.services.auth_service import AuthService
 from app.core.config import settings
-from app.core.rate_limit import check_rate_limit, check_ai_rate_limit, get_client_ip
+from app.core.rate_limit import check_rate_limit, check_ai_rate_limit
 from app.core import db
 
 logger = logging.getLogger(__name__)
@@ -151,7 +151,7 @@ async def delete_saved_recipe_endpoint(
 
 @router.post("/recipes/saved/batch-delete", status_code=status.HTTP_200_OK)
 async def batch_delete_recipes_endpoint(
-    recipe_ids: List[str],
+    recipe_ids: Annotated[List[str], Body(max_length=200)],
     user_id: str = Depends(get_current_user_id),
 ):
     """Elimina un lote de recetas guardadas de la base de datos."""
@@ -161,7 +161,11 @@ async def batch_delete_recipes_endpoint(
 
 @router.post("/recipes/generate", response_model=List[RecipeResponse], status_code=status.HTTP_200_OK)
 @router.post("/recipes", response_model=List[RecipeResponse], status_code=status.HTTP_200_OK)
-async def generate_recipes(req: RecipeGenerateRequest, request: Request) -> List[RecipeResponse]:
+async def generate_recipes(
+    req: RecipeGenerateRequest,
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+) -> List[RecipeResponse]:
     """Fase 1: Genera sugerencias de recetas utilizando DeepSeek Chat con variedad garantizada.
     Caché de corta duración (15s) para evitar bloqueos por doble-tap accidental sin impedir variedad.
     """
@@ -184,8 +188,7 @@ async def generate_recipes(req: RecipeGenerateRequest, request: Request) -> List
         else:
             del RECIPE_CACHE[cache_key]
 
-    client_ip = get_client_ip(request)
-    await check_ai_rate_limit(f"recipe_{client_ip}", max_per_minute=settings.MAX_CALLS_PER_MINUTE)
+    await check_ai_rate_limit(f"recipe_{user_id}", max_per_minute=settings.MAX_CALLS_PER_MINUTE)
     await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
     http_client = getattr(request.app.state, "http_client", None)
     recipes = await AIRecipeService.generate_recipes(req, http_client=http_client)
@@ -199,10 +202,13 @@ async def generate_recipes(req: RecipeGenerateRequest, request: Request) -> List
 
 
 @router.post("/recipes/steps", response_model=RecipeStepsResponse, status_code=status.HTTP_200_OK)
-async def get_recipe_steps(req: RecipeStepsRequest, request: Request) -> RecipeStepsResponse:
+async def get_recipe_steps(
+    req: RecipeStepsRequest,
+    request: Request,
+    user_id: str = Depends(get_current_user_id),
+) -> RecipeStepsResponse:
     """Fase 2 (Opción A Stateless): Genera los pasos detallados de preparación bajo demanda."""
-    client_ip = get_client_ip(request)
-    await check_ai_rate_limit(f"steps_{client_ip}", max_per_minute=settings.MAX_CALLS_PER_MINUTE)
+    await check_ai_rate_limit(f"steps_{user_id}", max_per_minute=settings.MAX_CALLS_PER_MINUTE)
     await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
     http_client = getattr(request.app.state, "http_client", None)
     steps = await AIRecipeService.generate_recipe_steps(req, http_client=http_client)

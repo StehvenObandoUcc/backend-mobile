@@ -4,11 +4,12 @@ import logging
 import uuid
 from typing import Optional
 import httpx
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import ValidationError
 
+from app.api.v1.inventory import get_current_user_id
 from app.core.config import settings
-from app.core.rate_limit import check_rate_limit, check_ai_rate_limit, get_client_ip
+from app.core.rate_limit import check_rate_limit, check_ai_rate_limit
 from app.schemas.scan import ScanResponse
 from app.schemas.ingredient import IngredientItem
 
@@ -180,10 +181,9 @@ async def _run_deepseek_vision(
 
 
 @router.post("/scan", response_model=ScanResponse, status_code=status.HTTP_200_OK)
-async def scan_image(request: Request) -> ScanResponse:
-    # Control de tasa por cliente/IP y global para proteger contra abusos en fase de pruebas (máximo 5 llamadas/min)
-    client_ip = get_client_ip(request)
-    await check_ai_rate_limit(f"scan_{client_ip}", max_per_minute=settings.MAX_CALLS_PER_MINUTE)
+async def scan_image(request: Request, user_id: str = Depends(get_current_user_id)) -> ScanResponse:
+    # Solo usuarios autenticados: control de tasa por usuario y global (máximo 5 llamadas/min en pruebas)
+    await check_ai_rate_limit(f"scan_{user_id}", max_per_minute=settings.MAX_CALLS_PER_MINUTE)
     await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
 
 

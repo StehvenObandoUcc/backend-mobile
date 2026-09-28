@@ -20,13 +20,14 @@ _total_calls = 0
 
 
 def get_client_ip(request: Request) -> str:
-    """Extrae la IP real del cliente considerando encabezados de proxy inverso."""
+    """Extrae la IP real del cliente detrás del router de Heroku.
+    El router AÑADE la IP de conexión al final de X-Forwarded-For; los valores previos los controla
+    el cliente, por lo que usar el primero permitiría evadir el rate limit rotando la cabecera."""
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
-        return forwarded.split(",")[0].strip()
-    real_ip = request.headers.get("x-real-ip")
-    if real_ip:
-        return real_ip.strip()
+        last = forwarded.split(",")[-1].strip()
+        if last:
+            return last
     return request.client.host if request.client else "unknown"
 
 

@@ -31,6 +31,7 @@ class IngredientBase(BaseModel):
     confirmed: bool = True
     imageUri: Optional[str] = Field(
         default=None,
+        max_length=2048,
         validation_alias=AliasChoices("imageUri", "image_uri"),
         description="URI o URL de foto del alimento",
     )
@@ -124,7 +125,7 @@ class IngredientItem(IngredientBase):
 
 class IngredientCreate(IngredientBase):
     """Modelo para crear un nuevo ingrediente (id opcional, se genera si falta)."""
-    id: Optional[str] = None
+    id: Optional[str] = Field(default=None, max_length=64)
 
 
 class IngredientUpdate(BaseModel):
@@ -215,4 +216,4 @@ class IngredientUpdate(BaseModel):
 
 
 class BatchDeleteRequest(BaseModel):
-    ids: List[str] = Field(min_length=1, description="Lista de IDs de ingredientes a eliminar")
+    ids: List[str] = Field(min_length=1, max_length=200, description="Lista de IDs de ingredientes a eliminar")

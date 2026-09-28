@@ -12,6 +12,12 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # En producción un JWT_SECRET inseguro permitiría falsificar tokens de cualquier usuario
+    if settings.is_production() and not settings.is_production_secure():
+        raise RuntimeError(
+            "JWT_SECRET inseguro en producción: defina un secreto aleatorio de al menos 32 caracteres."
+        )
+
     # Inicialización controlada de base de datos en el ciclo de vida de la aplicación
     init_db()
 

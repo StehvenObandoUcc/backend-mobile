@@ -10,7 +10,8 @@ def _load_env():
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
-                    os.environ[k.strip()] = v.strip().strip('"').strip("'")
+                    # Las variables reales del entorno tienen prioridad sobre el archivo .env
+                    os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 _load_env()
 
@@ -30,6 +31,12 @@ class Settings:
     def is_production_secure(self) -> bool:
         """Verifica si la configuración de seguridad es apta para producción."""
         return self.JWT_SECRET != self.DEFAULT_INSECURE_SECRET and len(self.JWT_SECRET) >= 32
+
+    # Entorno: Heroku define DYNO en cada contenedor; APP_ENV=production lo fuerza en otros hosts
+    APP_ENV: str = os.getenv("APP_ENV", "production" if os.getenv("DYNO") else "development").lower()
+
+    def is_production(self) -> bool:
+        return self.APP_ENV == "production"
 
     # Database
     DATABASE_PATH: str = os.getenv(

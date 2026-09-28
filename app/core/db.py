@@ -14,17 +14,31 @@ logger = logging.getLogger(__name__)
 _supabase_client = None
 
 
+def _supabase_configured() -> bool:
+    return bool(settings.SUPABASE_URL and settings.SUPABASE_KEY)
+
+
+def _db_unavailable(err: Exception, context: str):
+    """Supabase es la fuente de verdad cuando está configurado: nunca degradar a SQLite en silencio,
+    porque en Heroku el disco es efímero y los datos escritos ahí se perderían sin aviso."""
+    logger.error(f"[DB] {context}: {err}")
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="La base de datos no está disponible temporalmente. Intenta de nuevo en unos segundos.",
+    ) from err
+
+
 def get_supabase():
-    """Devuelve el cliente de Supabase si SUPABASE_URL y SUPABASE_KEY están presentes."""
+    """Devuelve el cliente de Supabase si SUPABASE_URL y SUPABASE_KEY están presentes.
+    Si está configurado pero no se puede inicializar, responde 503 en lugar de usar SQLite."""
     global _supabase_client
-    if _supabase_client is None and settings.SUPABASE_URL and settings.SUPABASE_KEY:
+    if _supabase_client is None and _supabase_configured():
         try:
             from supabase import create_client
             _supabase_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
             logger.info("[DB] Conectado exitosamente a Supabase Cloud Database.")
         except Exception as e:
-            logger.error(f"[DB] Error inicializando cliente Supabase: {e}")
-            _supabase_client = None
+            _db_unavailable(e, "Error inicializando cliente Supabase")
     return _supabase_client
 
 
@@ -132,10 +146,10 @@ def init_db():
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shopping_items_user_id ON shopping_items(user_id);")
 
-        # Verificar usuario demo en SQLite
+        # Usuario demo solo en desarrollo/tests: en producción sería una cuenta con contraseña pública
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM users WHERE email = ?", ("demo@foodai.com",))
-        if not cursor.fetchone():
+        if not settings.is_production() and not cursor.fetchone():
             from app.core.security import hash_password
             demo_hash = hash_password("123456")
             conn.execute(
@@ -161,7 +175,7 @@ def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
                 return res.data[0]
             return None
         except Exception as err:
-            logger.error(f"[DB] Error consultando usuario en Supabase: {err}")
+            _db_unavailable(err, "Error consultando usuario en Supabase")
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -183,7 +197,7 @@ def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
                 return res.data[0]
             return None
         except Exception as err:
-            logger.error(f"[DB] Error consultando usuario por ID en Supabase: {err}")
+            _db_unavailable(err, "Error consultando usuario por ID en Supabase")
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -262,7 +276,7 @@ def get_inventory_by_user(user_id: str) -> List[Dict[str, Any]]:
             res = sb.table("ingredients").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
             return [_row_to_ingredient_dict(item) for item in (res.data or [])]
         except Exception as err:
-            logger.error(f"[DB] Error consultando ingredientes en Supabase: {err}")
+            _db_unavailable(err, "Error consultando ingredientes en Supabase")
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -291,7 +305,7 @@ def get_ingredient_by_id(ingredient_id: str, user_id: str) -> Optional[Dict[str,
                 return _row_to_ingredient_dict(res.data[0])
             return None
         except Exception as err:
-            logger.error(f"[DB] Error consultando ingrediente por ID en Supabase: {err}")
+            _db_unavailable(err, "Error consultando ingrediente por ID en Supabase")
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -585,17 +599,13 @@ def delete_ingredients_batch(ingredient_ids: List[str], user_id: str) -> int:
 
 
 def reset_db():
-    """Limpia todos los usuarios e ingredientes excepto el usuario demo para pruebas aisladas."""
-    sb = get_supabase()
-    if sb:
-        try:
-            sb.table("shopping_items").delete().neq("id", "none").execute()
-            sb.table("recipes").delete().neq("id", "none").execute()
-            sb.table("ingredients").delete().neq("id", "none").execute()
-            sb.table("users").delete().neq("email", "demo@foodai.com").execute()
-            return
-        except Exception as err:
-            logger.error(f"[DB] Error reseteando base de datos en Supabase: {err}")
+    """Limpia todos los usuarios e ingredientes excepto el usuario demo para pruebas aisladas.
+    Solo opera sobre SQLite local: jamás debe vaciar la base de datos en la nube."""
+    if _supabase_configured() or settings.is_production():
+        raise RuntimeError(
+            "reset_db() rechazado: Supabase está configurado o el entorno es producción. "
+            "Los tests deben ejecutarse contra SQLite local."
+        )
 
     with get_connection() as conn:
         conn.execute("DELETE FROM shopping_items;")
@@ -640,10 +650,9 @@ def get_saved_recipes_by_user(user_id: str) -> List[Dict[str, Any]]:
     if sb:
         try:
             res = sb.table("recipes").select("*").eq("user_id", user_id).order("created_at", desc=True).execute()
-            if res.data is not None:
-                return [_row_to_recipe_dict(item) for item in res.data]
+            return [_row_to_recipe_dict(item) for item in (res.data or [])]
         except Exception as err:
-            logger.warning(f"[DB] Error consultando recetas en Supabase (usando fallback SQLite): {err}")
+            _db_unavailable(err, "Error consultando recetas en Supabase")
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -670,8 +679,9 @@ def get_saved_recipe_by_id(recipe_id: str, user_id: str) -> Optional[Dict[str, A
             res = sb.table("recipes").select("*").eq("id", recipe_id).eq("user_id", user_id).execute()
             if res.data and len(res.data) > 0:
                 return _row_to_recipe_dict(res.data[0])
+            return None
         except Exception as err:
-            logger.warning(f"[DB] Error consultando receta en Supabase: {err}")
+            _db_unavailable(err, "Error consultando receta en Supabase")
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -683,8 +693,17 @@ def get_saved_recipe_by_id(recipe_id: str, user_id: str) -> Optional[Dict[str, A
         return _row_to_recipe_dict(row) if row else None
 
 
+def _reject_foreign_recipe(recipe_id: str, owner_id: Optional[str], user_id: str):
+    """Rechaza escrituras sobre un ID de receta que pertenece a otro usuario (evita robo por upsert)."""
+    if owner_id is not None and owner_id != user_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"La receta con ID '{recipe_id}' ya pertenece a otro usuario.",
+        )
+
+
 def save_recipe(recipe: Dict[str, Any], user_id: str) -> Dict[str, Any]:
-    """Guarda o actualiza una receta en la base de datos persistente."""
+    """Guarda o actualiza una receta del usuario. Nunca sobrescribe filas de otro usuario."""
     rec_id = recipe.get("id") or f"rec-{uuid.uuid4().hex[:8]}"
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -713,44 +732,77 @@ def save_recipe(recipe: Dict[str, Any], user_id: str) -> Dict[str, Any]:
         "created_at": recipe.get("createdAt") or recipe.get("created_at") or now_iso,
         "updated_at": now_iso,
     }
+    # Campos modificables en una actualización (id, dueño y fecha de creación son inmutables)
+    updates = {k: v for k, v in record.items() if k not in ("id", "user_id", "created_at")}
 
     sb = get_supabase()
     if sb:
         try:
-            res = sb.table("recipes").upsert(record).execute()
+            existing_res = sb.table("recipes").select("id,user_id").eq("id", rec_id).execute()
+            if existing_res.data:
+                _reject_foreign_recipe(rec_id, existing_res.data[0].get("user_id"), user_id)
+                res = sb.table("recipes").update(updates).eq("id", rec_id).eq("user_id", user_id).execute()
+            else:
+                # insert (no upsert): si otro usuario inserta el mismo ID en paralelo, falla por PK
+                res = sb.table("recipes").insert(record).execute()
             if res.data and len(res.data) > 0:
                 return _row_to_recipe_dict(res.data[0])
             return _row_to_recipe_dict(record)
+        except HTTPException:
+            raise
         except Exception as err:
-            logger.warning(f"[DB] Error guardando receta en Supabase (fallback SQLite): {err}")
+            err_str = str(err).lower()
+            if "duplicate key" in err_str or "23505" in err_str or "unique constraint" in err_str:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"La receta con ID '{rec_id}' ya existe.",
+                ) from err
+            _db_unavailable(err, "Error guardando receta en Supabase")
 
     with get_connection() as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO recipes (
-                id, user_id, title, description, prep_time_minutes, servings,
-                difficulty, match_score, available_ingredients, missing_ingredients,
-                steps, is_saved, is_prepared, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                record["id"],
-                record["user_id"],
-                record["title"],
-                record["description"],
-                record["prep_time_minutes"],
-                record["servings"],
-                record["difficulty"],
-                record["match_score"],
-                record["available_ingredients"],
-                record["missing_ingredients"],
-                record["steps"],
-                record["is_saved"],
-                record["is_prepared"],
-                record["created_at"],
-                record["updated_at"],
-            ),
-        )
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id FROM recipes WHERE id = ?", (rec_id,))
+        row = cursor.fetchone()
+        if row:
+            _reject_foreign_recipe(rec_id, row["user_id"], user_id)
+            set_clauses = ", ".join(f"{k} = ?" for k in updates)
+            conn.execute(
+                f"UPDATE recipes SET {set_clauses} WHERE id = ? AND user_id = ?",
+                [*updates.values(), rec_id, user_id],
+            )
+        else:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO recipes (
+                        id, user_id, title, description, prep_time_minutes, servings,
+                        difficulty, match_score, available_ingredients, missing_ingredients,
+                        steps, is_saved, is_prepared, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record["id"],
+                        record["user_id"],
+                        record["title"],
+                        record["description"],
+                        record["prep_time_minutes"],
+                        record["servings"],
+                        record["difficulty"],
+                        record["match_score"],
+                        record["available_ingredients"],
+                        record["missing_ingredients"],
+                        record["steps"],
+                        record["is_saved"],
+                        record["is_prepared"],
+                        record["created_at"],
+                        record["updated_at"],
+                    ),
+                )
+            except sqlite3.IntegrityError as err:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"La receta con ID '{rec_id}' ya existe.",
+                ) from err
         conn.commit()
 
     return _row_to_recipe_dict(record)
@@ -762,10 +814,9 @@ def delete_saved_recipe(recipe_id: str, user_id: str) -> bool:
     if sb:
         try:
             res = sb.table("recipes").delete().eq("id", recipe_id).eq("user_id", user_id).execute()
-            if res.data is not None and len(res.data) > 0:
-                return True
+            return bool(res.data)
         except Exception as err:
-            logger.warning(f"[DB] Error eliminando receta en Supabase (fallback SQLite): {err}")
+            _db_unavailable(err, "Error eliminando receta en Supabase")
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -783,10 +834,9 @@ def delete_saved_recipes_batch(recipe_ids: List[str], user_id: str) -> int:
     if sb:
         try:
             res = sb.table("recipes").delete().in_("id", recipe_ids).eq("user_id", user_id).execute()
-            if res.data is not None:
-                return len(res.data)
+            return len(res.data or [])
         except Exception as err:
-            logger.warning(f"[DB] Error eliminando lote de recetas en Supabase: {err}")
+            _db_unavailable(err, "Error eliminando lote de recetas en Supabase")
 
     with get_connection() as conn:
         placeholders = ",".join(["?"] * len(recipe_ids))
@@ -818,10 +868,9 @@ def get_shopping_items_by_user(user_id: str) -> List[Dict[str, Any]]:
     if sb:
         try:
             res = sb.table("shopping_items").select("*").eq("user_id", user_id).order("created_at", desc=False).execute()
-            if res.data is not None:
-                return [_row_to_shopping_dict(item) for item in res.data]
+            return [_row_to_shopping_dict(item) for item in (res.data or [])]
         except Exception as err:
-            logger.warning(f"[DB] Error consultando lista de compras en Supabase (fallback SQLite): {err}")
+            _db_unavailable(err, "Error consultando lista de compras en Supabase")
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -846,8 +895,9 @@ def get_shopping_item_by_id(item_id: str, user_id: str) -> Optional[Dict[str, An
             res = sb.table("shopping_items").select("*").eq("id", item_id).eq("user_id", user_id).execute()
             if res.data and len(res.data) > 0:
                 return _row_to_shopping_dict(res.data[0])
+            return None
         except Exception as err:
-            logger.warning(f"[DB] Error consultando artículo de compras en Supabase: {err}")
+            _db_unavailable(err, "Error consultando artículo de compras en Supabase")
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -926,7 +976,7 @@ def create_shopping_item(item: Dict[str, Any], user_id: str) -> Dict[str, Any]:
                         status_code=status.HTTP_409_CONFLICT,
                         detail=f"El artículo con ID '{item_id}' ya pertenece a otro usuario."
                     )
-            logger.warning(f"[DB] Error insertando artículo en Supabase (fallback SQLite): {err}")
+            _db_unavailable(err, "Error insertando artículo en Supabase")
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -1037,8 +1087,9 @@ def update_shopping_item(item_id: str, user_id: str, updates: Dict[str, Any]) ->
             res = sb.table("shopping_items").update(payload).eq("id", item_id).eq("user_id", user_id).execute()
             if res.data and len(res.data) > 0:
                 return _row_to_shopping_dict(res.data[0])
+            return None
         except Exception as err:
-            logger.warning(f"[DB] Error actualizando en Supabase (fallback SQLite): {err}")
+            _db_unavailable(err, "Error actualizando artículo de compras en Supabase")
 
     set_clauses = [f"{k} = ?" for k in payload.keys()]
     values = list(payload.values())
@@ -1062,10 +1113,9 @@ def delete_shopping_item(item_id: str, user_id: str) -> bool:
     if sb:
         try:
             res = sb.table("shopping_items").delete().eq("id", item_id).eq("user_id", user_id).execute()
-            if res.data is not None and len(res.data) > 0:
-                return True
+            return bool(res.data)
         except Exception as err:
-            logger.warning(f"[DB] Error eliminando en Supabase (fallback SQLite): {err}")
+            _db_unavailable(err, "Error eliminando artículo de compras en Supabase")
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -1080,10 +1130,9 @@ def delete_bought_shopping_items(user_id: str) -> int:
     if sb:
         try:
             res = sb.table("shopping_items").delete().eq("user_id", user_id).eq("is_bought", 1).execute()
-            if res.data is not None:
-                return len(res.data)
+            return len(res.data or [])
         except Exception as err:
-            logger.warning(f"[DB] Error eliminando comprados en Supabase: {err}")
+            _db_unavailable(err, "Error eliminando comprados en Supabase")
 
     with get_connection() as conn:
         cursor = conn.cursor()

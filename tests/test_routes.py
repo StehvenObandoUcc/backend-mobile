@@ -55,7 +55,7 @@ MOCK_SCAN_RESULT = ScanResponse(
 
 
 @patch("app.api.v1.scan._run_deepseek_vision", new_callable=AsyncMock)
-def test_scan_accepts_jpeg_and_returns_ingredients(mock_vision):
+def test_scan_accepts_jpeg_and_returns_ingredients(mock_vision, auth_headers):
     """POST /api/v1/scan debe aceptar una imagen JPEG y devolver la propiedad ingredients."""
     mock_vision.return_value = MOCK_SCAN_RESULT
     fake_jpeg_content = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x01\x00`\x00`\x00\x00"
@@ -63,7 +63,7 @@ def test_scan_accepts_jpeg_and_returns_ingredients(mock_vision):
         "image": ("test.jpg", io.BytesIO(fake_jpeg_content), "image/jpeg")
     }
 
-    response = client.post("/api/v1/scan", files=files)
+    response = client.post("/api/v1/scan", files=files, headers=auth_headers)
     assert response.status_code == 200
 
     data = response.json()
@@ -75,14 +75,14 @@ def test_scan_accepts_jpeg_and_returns_ingredients(mock_vision):
 
 
 @patch("app.api.v1.scan._run_deepseek_vision", new_callable=AsyncMock)
-def test_scan_accepts_base64_json(mock_vision):
+def test_scan_accepts_base64_json(mock_vision, auth_headers):
     """POST /api/v1/scan debe aceptar JSON con image_base64."""
     mock_vision.return_value = MOCK_SCAN_RESULT
     payload = {
         "image_base64": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
         "mime_type": "image/png"
     }
-    response = client.post("/api/v1/scan", json=payload)
+    response = client.post("/api/v1/scan", json=payload, headers=auth_headers)
     assert response.status_code == 200
     data = response.json()
     assert "scan_id" in data
@@ -90,7 +90,7 @@ def test_scan_accepts_base64_json(mock_vision):
     assert data["ingredients"][0]["name"] == "Tomate"
 
 
-def test_scan_rejects_empty_payload():
+def test_scan_rejects_empty_payload(auth_headers):
     """POST /api/v1/scan debe responder con HTTP 400 si no se envía imagen ni base64."""
-    response = client.post("/api/v1/scan", json={})
+    response = client.post("/api/v1/scan", json={}, headers=auth_headers)
     assert response.status_code == 400
