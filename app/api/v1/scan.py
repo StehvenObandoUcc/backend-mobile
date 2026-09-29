@@ -29,7 +29,14 @@ def _resolve_expiration(item: dict, today) -> Optional[str]:
     """Fecha impresa si la hay; si no, hoy + vida útil estimada (la IA no conoce la fecha actual)."""
     printed = item.get("expirationDate")
     if isinstance(printed, str) and len(printed) >= 10:
-        return printed[:10]
+        # Solo se acepta una fecha real 'YYYY-MM-DD' y razonable; si no, se usa la vida útil estimada.
+        # (Una fecha mal formada hacía fallar la validación y se perdía TODO el escaneo.)
+        try:
+            parsed = datetime.strptime(printed[:10], "%Y-%m-%d").date()
+            if today.year - 2 <= parsed.year <= today.year + 10:
+                return parsed.isoformat()
+        except ValueError:
+            pass
     days = item.get("shelfLifeDays")
     try:
         days = int(days)
@@ -187,7 +194,7 @@ async def _run_deepseek_vision(
                 confirmed=False,
             )
             for i, item in enumerate(raw_ingredients)
-            if item.get("name")
+            if isinstance(item, dict) and item.get("name")
         ]
 
         # Validar contrato estricto de ScanResponse (is_food requerido sin default)
