@@ -2,6 +2,7 @@ import base64
 import json
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -15,6 +16,28 @@ from app.schemas.ingredient import IngredientItem
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Hora de Colombia (UTC-5, sin horario de verano). Las fechas de la app son siempre del calendario local.
+_COLOMBIA_TZ = timezone(timedelta(hours=-5))
+
+
+def _today_colombia():
+    return datetime.now(_COLOMBIA_TZ).date()
+
+
+def _resolve_expiration(item: dict, today) -> Optional[str]:
+    """Fecha impresa si la hay; si no, hoy + vida útil estimada (la IA no conoce la fecha actual)."""
+    printed = item.get("expirationDate")
+    if isinstance(printed, str) and len(printed) >= 10:
+        return printed[:10]
+    days = item.get("shelfLifeDays")
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        return None
+    if days < 0 or days > 3650:
+        return None
+    return (today + timedelta(days=days)).isoformat()
 
 ALLOWED_IMAGE_TYPES = {
     "image/jpeg",
@@ -42,8 +65,10 @@ async def _run_deepseek_vision(
         b64_image = b64_image.split(",", 1)[1]
 
 
+    today = _today_colombia()
     # Prompt condensado: sin relleno conversacional, preservando reglas morfológicas y de confianza
     prompt = (
+        f"Fecha de hoy: {today.isoformat()}.\n"
         "Analiza la imagen e identifica los alimentos con máxima fidelidad visual.\n\n"
         "1. FILTRO DE CONSUMIBLES:\n"
         "Si la imagen NO contiene alimentos o bebidas comestibles, "
@@ -56,7 +81,8 @@ async def _run_deepseek_vision(
         "- Nombre específico y común en español.\n"
         "- Categorías válidas: 'vegetable', 'fruit', 'protein', 'dairy', 'grain', 'legume', 'sauce', 'snack', 'other'.\n"
         "- Unidades válidas: 'units', 'grams', 'kilograms', 'milliliters', 'liters', 'package', 'unknown'. Si no puedes estimar con certeza cantidad o unidad, devuelve null.\n"
-        "- Fecha de vencimiento (expirationDate): Si está impresa en el empaque, extráela en 'YYYY-MM-DD'. Si es un alimento fresco sin empaque, estima 'YYYY-MM-DD' realista según su vida útil típica.\n"
+        "- Fecha de vencimiento: si está impresa y legible en el empaque, ponla en expirationDate como 'YYYY-MM-DD' y shelfLifeDays: null. "
+        "Si NO está impresa (alimento fresco o etiqueta no visible), pon expirationDate: null y en shelfLifeDays el número entero de días de vida útil típica desde hoy (p. ej. huevos refrigerados 28, tomate 7). No inventes fechas.\n"
         "- Confianza (confidence): número decimal entre 0.0 y 1.0 según la certeza y claridad visual. Si tienes dudas razonables sobre la identidad de un alimento, asigna una confianza baja (menor a 0.6) en lugar de adivinar con alta confianza.\n\n"
         "Devuelve EXCLUSIVAMENTE un objeto JSON válido con esta estructura exacta:\n"
         "{\n"
@@ -68,7 +94,8 @@ async def _run_deepseek_vision(
         '      "category": "vegetable",\n'
         '      "quantity": 2,\n'
         '      "unit": "units",\n'
-        '      "expirationDate": "2026-09-26",\n'
+        '      "expirationDate": null,\n'
+        '      "shelfLifeDays": 7,\n'
         '      "confidence": 0.95\n'
         "    }\n"
         "  ]\n"
@@ -154,7 +181,7 @@ async def _run_deepseek_vision(
                 category=item.get("category", "other"),
                 quantity=item.get("quantity"),      # None real si no se cuantificó
                 unit=item.get("unit"),              # None real si no se especificó
-                expirationDate=item.get("expirationDate"),
+                expirationDate=_resolve_expiration(item, _today_colombia()),
                 confidence=item.get("confidence"),  # None real si no hay score
                 source="ai",
                 confirmed=False,
