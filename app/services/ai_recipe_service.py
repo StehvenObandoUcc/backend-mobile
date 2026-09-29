@@ -211,6 +211,18 @@ class AIRecipeService:
         else:
             focus_clause = f"- Enfoque culinario: {re.sub(r'[\r\n\t]+', ' ', req.focus)[:60].strip()}."
 
+        servings_clause = (
+            f"- Porciones: cada receta debe rendir {req.servings} porciones (usa \"servings\": {req.servings} y ajusta las cantidades)."
+            if getattr(req, "servings", None)
+            else ""
+        )
+        avoid_list = getattr(req, "avoid_ingredients", None) or []
+        avoid_clause = (
+            f"- PROHIBIDO usar estos ingredientes (alergias o preferencias del usuario), ni en la receta ni en los faltantes: {', '.join(avoid_list)}."
+            if avoid_list
+            else ""
+        )
+
         single_clause = ""
         if len(req.ingredients) == 1:
             single_name = str(req.ingredients[0].get("name", "")).strip()
@@ -250,6 +262,8 @@ Restricciones:
 {focus_clause}
 {difficulty_clause}
 {dietary_clause}
+{servings_clause}
+{avoid_clause}
 {single_clause}
 - matchScore: Porcentaje entero entre 60 y 100 según ingredientes disponibles.
 - Unidades permitidas para 'unit': ÚNICAMENTE 'units', 'grams', 'kilograms', 'milliliters', 'liters', 'package', 'unknown'.
@@ -263,7 +277,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
       "title": "Nombre de la receta",
       "description": "Descripción apetitosa de 1 oración.",
       "prepTimeMinutes": {min(req.max_prep_time, 25)},
-      "servings": 2,
+      "servings": {req.servings or 2},
       "difficulty": "easy",
       "matchScore": 95,
       "availableIngredients": [
@@ -329,7 +343,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
                     title=str(item.get("title", "Receta sugerida")).strip(),
                     description=str(item.get("description", "")).strip(),
                     prepTimeMinutes=int(item.get("prepTimeMinutes", req.max_prep_time)),
-                    servings=int(item.get("servings", 2)),
+                    servings=req.servings or int(item.get("servings", 2)),
                     difficulty=item.get("difficulty", "easy"),
                     matchScore=int(item.get("matchScore", 90)),
                     availableIngredients=[sanitize_recipe_ingredient(i) for i in raw_available] if isinstance(raw_available, list) else [],
