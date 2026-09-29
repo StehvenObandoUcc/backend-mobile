@@ -51,6 +51,28 @@ class RecipeGenerateRequest(BaseModel):
         description="Preferencia dietaria: 'any', 'vegetarian', 'vegan', 'keto', 'gluten_free', 'low_carb'",
     )
 
+    servings: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=12,
+        description="Porciones por receta (Configuración › Porciones por defecto)",
+    )
+    avoid_ingredients: List[str] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Ingredientes que el usuario no come o le dan alergia (Configuración)",
+    )
+
+    @field_validator("avoid_ingredients")
+    @classmethod
+    def sanitize_avoid(cls, items: List[str]) -> List[str]:
+        cleaned = []
+        for raw in items[:20]:
+            name = re.sub(r'[\r\n\t]+', ' ', str(raw)).strip()[:40]
+            if name:
+                cleaned.append(name)
+        return cleaned
+
     @field_validator("ingredients")
     @classmethod
     def sanitize_ingredients(cls, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
