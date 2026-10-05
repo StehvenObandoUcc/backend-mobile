@@ -71,14 +71,14 @@ Está pensado para usuarios finales de la app móvil (a través de ella) y para 
 
 ```mermaid
 flowchart LR
-    App[App móvil Food AI] -->|HTTPS + JWT| API[FastAPI /api/v1]
-    API --> Auth[Auth / Security]
-    API --> RL[Rate limit IA]
-    API --> AI[Servicios IA]
-    AI -->|httpx| DS[DeepSeek API]
-    API --> DB[(core/db.py)]
-    DB -->|si está configurado| SB[(Supabase PostgreSQL)]
-    DB -->|desarrollo / tests| SQ[(SQLite)]
+    App["App móvil Food AI"] -->|"HTTPS + JWT"| API["FastAPI (/api/v1)"]
+    API --> Auth["Auth y Security"]
+    API --> RL["Rate limit IA"]
+    API --> AI["Servicios IA"]
+    AI -->|"httpx"| DS["DeepSeek API"]
+    API --> DB[("core/db.py")]
+    DB -->|"si está configurado"| SB[("Supabase PostgreSQL")]
+    DB -->|"desarrollo y tests"| SQ[("SQLite")]
 ```
 
 Capas principales:
