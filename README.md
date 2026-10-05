@@ -1,131 +1,215 @@
+<div align="center">
+
 # Food AI — Backend API
 
-Backend mínimo construido con FastAPI para la aplicación móvil **Food AI**. Permite validar la conectividad de la aplicación móvil y el flujo de escaneo de alimentos con respuestas estructuradas simuladas (sin llamadas externas a modelos de IA en esta fase inicial).
+**API REST para gestionar la despensa, escanear alimentos y generar recetas con IA.**
+
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-≥0.110-009688?logo=fastapi&logoColor=white)
+![Supabase](https://img.shields.io/badge/Supabase-PostgreSQL-3ECF8E?logo=supabase&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-fallback_local-003B57?logo=sqlite&logoColor=white)
+![Heroku](https://img.shields.io/badge/Heroku-deploy-430098?logo=heroku&logoColor=white)
+![Pytest](https://img.shields.io/badge/tests-pytest-0A9EDC?logo=pytest&logoColor=white)
+
+</div>
 
 ---
 
-## Requisitos
+## Tabla de contenido
 
-- Python 3.11 o superior instalado en el sistema.
+- [Acerca del proyecto](#acerca-del-proyecto)
+- [Características principales](#características-principales)
+- [Stack tecnológico](#stack-tecnológico)
+- [Arquitectura y cómo funciona](#arquitectura-y-cómo-funciona)
+- [Relación con la app móvil](#relación-con-la-app-móvil)
+- [Instalación y ejecución](#instalación-y-ejecución)
+- [Pruebas](#pruebas)
+- [Estructura de carpetas](#estructura-de-carpetas)
+- [Cómo contribuir](#cómo-contribuir)
+- [Licencia](#licencia)
 
----
+## Acerca del proyecto
 
-## Instalación y Configuración (Windows PowerShell)
+**Food AI Backend** es el servicio que da soporte a la aplicación móvil **Food AI**. Resuelve un problema cotidiano: saber qué hay en la despensa, cuándo vence y qué se puede cocinar con ello.
 
-1. **Abrir PowerShell** y ubicarse en la carpeta `backend`:
-   ```powershell
-   cd backend
-   ```
+Está pensado para usuarios finales de la app móvil (a través de ella) y para desarrolladores que mantengan o extiendan el ecosistema. Expone una API REST que:
 
-2. **Crear el entorno virtual**:
-   ```powershell
-   py -3.11 -m venv .venv
-   ```
-   *(o simplemente `python -m venv .venv` según la configuración de tu sistema)*
+- Autentica usuarios y aísla los datos de cada uno.
+- Analiza fotografías de alimentos con un modelo de visión (DeepSeek) y devuelve ingredientes estructurados.
+- Genera recetas y pasos de preparación a partir de los ingredientes disponibles.
+- Persiste inventario, lista de compras y recetas guardadas.
 
-3. **Activar el entorno virtual**:
-   ```powershell
-   .\.venv\Scripts\Activate.ps1
-   ```
-   > *Nota:* Si Windows bloquea la ejecución de scripts, puedes habilitarla temporalmente con:
-   > `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`
+## Características principales
 
-4. **Instalar dependencias**:
-   ```powershell
-   pip install -r requirements.txt
-   ```
+- **Autenticación** con registro, inicio de sesión y `/auth/me`; contraseñas con PBKDF2-HMAC-SHA256 (600 000 iteraciones) y tokens JWT (HS256).
+- **Escaneo de alimentos con IA**: acepta imagen en `base64` (JSON) o `multipart/form-data`, límite de 10 MB, y devuelve ingredientes con categoría, cantidad, unidad y confianza.
+- **Generación de recetas con IA** con parámetros de dificultad, enfoque, tiempo máximo, porciones, preferencia dietética e ingredientes a evitar, más caché de corta duración y validaciones de coherencia culinaria.
+- **Inventario** (CRUD, borrado por lotes) con operaciones idempotentes para sincronización offline.
+- **Lista de compras** (CRUD, alta por lotes, borrado de comprados).
+- **Recetas guardadas** por usuario.
+- **Límite de uso de IA** por usuario y global, en memoria.
+- **Seguridad**: cabeceras HTTP de seguridad, CORS configurable, validación de configuración en producción y políticas RLS para Supabase (`migrations/01_enable_rls.sql`).
+- **Persistencia dual**: Supabase cuando está configurado; SQLite local para desarrollo y pruebas.
 
----
+## Stack tecnológico
 
-## Ejecución del Servidor
+| Componente | Tecnología | Versión |
+|---|---|---|
+| Lenguaje | Python | 3.12.8 (`runtime.txt`) |
+| Framework web | FastAPI | ≥ 0.110.0 |
+| Servidor ASGI | Uvicorn (`standard`) / Gunicorn | ≥ 0.28.0 / ≥ 21.2.0 |
+| Validación | Pydantic | ≥ 2.0.0 |
+| Formularios multipart | python-multipart | ≥ 0.0.9 |
+| Cliente HTTP | httpx | ≥ 0.27.0 |
+| Base de datos (nube) | Supabase (PostgreSQL) — `supabase` | ≥ 2.0.0 |
+| Base de datos (local) | SQLite (módulo estándar) | — |
+| IA | API de DeepSeek (visión y chat) | — |
+| Pruebas | pytest | ≥ 8.0.0 |
+| Despliegue | Heroku (`Procfile`) | — |
 
-Inicia el servidor de desarrollo Uvicorn:
+## Arquitectura y cómo funciona
+
+```mermaid
+flowchart LR
+    App[App móvil Food AI] -->|HTTPS + JWT| API[FastAPI /api/v1]
+    API --> Auth[Auth / Security]
+    API --> RL[Rate limit IA]
+    API --> AI[Servicios IA]
+    AI -->|httpx| DS[DeepSeek API]
+    API --> DB[(core/db.py)]
+    DB -->|si está configurado| SB[(Supabase PostgreSQL)]
+    DB -->|desarrollo / tests| SQ[(SQLite)]
+```
+
+Capas principales:
+
+| Capa | Carpeta | Responsabilidad |
+|---|---|---|
+| Rutas | `app/api/v1/` | Endpoints REST agrupados por dominio |
+| Esquemas | `app/schemas/` | Modelos Pydantic de entrada/salida |
+| Servicios | `app/services/` | Lógica de autenticación y generación de recetas con IA |
+| Núcleo | `app/core/` | Configuración, acceso a datos, seguridad y límites de uso |
+
+**Flujo de punta a punta: escanear la despensa**
+
+1. La app envía `POST /api/v1/scan` con la foto en base64 y el token Bearer.
+2. `get_current_user_id` valida el JWT; se aplica el límite de llamadas de IA por usuario y global.
+3. Se valida el tamaño (≤ 10 MB) y el servicio consulta el modelo de visión de DeepSeek.
+4. La respuesta se valida contra el esquema `ScanResponse` (`is_food`, `ingredients`, `warnings`); si es inválida, se responde `502`.
+5. La app muestra los ingredientes detectados; al confirmarlos, los guarda con `POST /api/v1/inventory`, que persiste en Supabase (o SQLite en local) asociados al usuario.
+
+> Si la clave de IA no está configurada, los endpoints de escaneo y generación responden `503`. Si Supabase está configurado pero no disponible, la API responde `503` en lugar de degradar silenciosamente a SQLite.
+
+## Relación con la app móvil
+
+Este repositorio es el backend de **[App-mobile-front](https://github.com/StehvenObandoUcc/App-mobile-front)** (app móvil Expo / React Native).
+
+- **Protocolo:** REST sobre HTTP(S), prefijo `/api/v1`.
+- **Formato:** JSON (el escaneo admite además `multipart/form-data`).
+- **Autenticación:** cabecera `Authorization: Bearer <token>` obtenida en `/auth/login` o `/auth/register`.
+- **Consumo:** la app centraliza las llamadas en `src/services/api-client.ts` y reintenta mutaciones offline mediante una cola (outbox).
+
+### Endpoints principales
+
+| Método | Ruta | Descripción | Auth |
+|---|---|---|---|
+| GET | `/api/v1/health` | Estado del servicio | No |
+| POST | `/api/v1/auth/register` | Registro de usuario | No |
+| POST | `/api/v1/auth/login` | Inicio de sesión | No |
+| GET | `/api/v1/auth/me` | Usuario actual | Sí |
+| POST | `/api/v1/scan` | Analiza una imagen de alimentos | Sí |
+| GET | `/api/v1/inventory` | Lista el inventario | Sí |
+| POST | `/api/v1/inventory` | Crea un ingrediente | Sí |
+| PUT | `/api/v1/inventory/{id}` | Actualiza un ingrediente | Sí |
+| DELETE | `/api/v1/inventory/{id}` | Elimina un ingrediente | Sí |
+| POST | `/api/v1/inventory/batch-delete` | Elimina varios ingredientes | Sí |
+| GET | `/api/v1/shopping` | Lista de compras | Sí |
+| POST | `/api/v1/shopping` · `/batch` | Crea uno o varios ítems | Sí |
+| PUT | `/api/v1/shopping/{id}` | Actualiza un ítem | Sí |
+| DELETE | `/api/v1/shopping/{id}` · `/bought` | Elimina un ítem o los comprados | Sí |
+| GET | `/api/v1/recipes` | Sugerencias base o recetas guardadas | Opcional |
+| POST | `/api/v1/recipes` · `/recipes/generate` | Genera recetas con IA | Sí |
+| POST | `/api/v1/recipes/steps` | Genera los pasos de una receta | Por confirmar |
+| GET | `/api/v1/recipes/saved` | Recetas guardadas | Sí |
+| POST | `/api/v1/recipes/save` | Guarda una receta | Por confirmar |
+| DELETE | `/api/v1/recipes/saved/{id}` | Elimina una receta guardada | Por confirmar |
+| POST | `/api/v1/recipes/saved/batch-delete` | Elimina varias recetas guardadas | Por confirmar |
+
+La documentación interactiva queda disponible en `/docs` (Swagger UI) y `/redoc` al ejecutar el servidor.
+
+## Instalación y ejecución
+
+### Requisitos
+
+- Python 3.12 (el repo fija `python-3.12.8` en `runtime.txt`; la versión mínima soportada es **Por confirmar**).
+- Un archivo de entorno propio (`.env` en la carpeta del backend) con la configuración necesaria. No se documentan aquí sus variables ni se incluye ninguno en el repositorio.
+
+### Pasos (Windows PowerShell)
+
 ```powershell
+# 1. Clonar y entrar al backend
+git clone https://github.com/StehvenObandoUcc/backend-mobile.git
+cd backend-mobile
+
+# 2. Crear y activar el entorno virtual
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# 3. Instalar dependencias
+pip install -r requirements.txt
+
+# 4. Crear tu archivo de entorno propio (.env) con tu configuración
+
+# 5. Iniciar el servidor
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-> **Host 0.0.0.0:** Permite que tu teléfono móvil físico o emulador pueda acceder a la API a través de la IP local de tu computadora (por ejemplo, `http://192.168.1.X:8000`).
+En Linux/macOS, activa el entorno con `source .venv/bin/activate`.
 
-### Detener el Servidor
-Presiona `Ctrl + C` en la terminal para detener el proceso de Uvicorn.
+> `--host 0.0.0.0` permite que un teléfono físico o emulador acceda a la API desde la IP local del equipo.
 
----
+Verifica el servicio en `http://localhost:8000/api/v1/health` y explora la API en `http://localhost:8000/docs`.
 
-## Documentación Interactiva (Swagger / OpenAPI)
+### Despliegue
 
-Una vez iniciado el servidor, puedes explorar y probar los endpoints desde tu navegador:
-- **Swagger UI:** [http://localhost:8000/docs](http://localhost:8000/docs)
-- **ReDoc:** [http://localhost:8000/redoc](http://localhost:8000/redoc)
+El `Procfile` define el proceso web para Heroku: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. En producción, la aplicación se niega a arrancar si el secreto JWT es inseguro.
 
----
-
-## Endpoints Disponibles
-
-### 1. Health Check
-- **Método:** `GET`
-- **Ruta:** `/api/v1/health`
-- **Descripción:** Verifica el estado operativo de la API.
-- **Respuesta exitosa (200 OK):**
-  ```json
-  {
-    "status": "ok",
-    "service": "food-ai-backend"
-  }
-  ```
-
-### 2. Escaneo de Alimentos (Simulado)
-- **Método:** `POST`
-- **Ruta:** `/api/v1/scan`
-- **Content-Type:** `multipart/form-data`
-- **Parámetro obligatorio:** `image` (archivo binario de imagen).
-- **Tipos MIME soportados:** `image/jpeg`, `image/png`, `image/webp`.
-- **Respuesta exitosa (200 OK):**
-  ```json
-  {
-    "scan_id": "demo-scan",
-    "ingredients": [
-      {
-        "id": "demo-1",
-        "name": "Tomate",
-        "category": "vegetable",
-        "quantity": 4,
-        "unit": "units",
-        "confidence": 0.9,
-        "source": "ai",
-        "confirmed": false,
-        "expirationDate": null
-      }
-    ],
-    "warnings": []
-  }
-  ```
-- **Errores comunes:**
-  - `400 Bad Request`: Si el archivo no corresponde a una imagen JPEG, PNG o WebP.
-  - `422 Unprocessable Entity`: Si falta el campo `image` en la solicitud multipart.
-
----
-
-## Ejemplos de Prueba
-
-### Prueba con Swagger UI
-1. Abre [http://localhost:8000/docs](http://localhost:8000/docs).
-2. Despliega `POST /api/v1/scan` y haz clic en **"Try it out"**.
-3. Selecciona una fotografía (`.jpg`, `.png` o `.webp`) en el campo `image`.
-4. Presiona **"Execute"** y revisa el JSON de respuesta devuelto con código `200`.
-
-### Prueba con cURL
-```bash
-curl -X POST "http://localhost:8000/api/v1/scan" \
-  -H "accept: application/json" \
-  -H "Content-Type: multipart/form-data" \
-  -F "image=@ruta/a/tu/foto.jpg"
-```
-
----
-
-## Ejecución de Pruebas Automatizadas
+## Pruebas
 
 Con el entorno virtual activado:
+
 ```powershell
 pytest
 ```
+
+La suite cubre autenticación, rutas, inventario y persistencia, validación, recetas y coherencia culinaria, idempotencia, endurecimiento de seguridad y políticas RLS de Supabase.
+
+## Estructura de carpetas
+
+```
+.
+├── app/
+│   ├── main.py              # Aplicación FastAPI, CORS, cabeceras de seguridad y ciclo de vida
+│   ├── api/v1/              # Endpoints: auth, health, inventory, recipes, scan, shopping
+│   ├── core/                # config, db (Supabase/SQLite), security (hash + JWT), rate_limit
+│   ├── schemas/             # Modelos Pydantic: auth, ingredient, recipe, scan, shopping
+│   └── services/            # auth_service, ai_recipe_service
+├── migrations/
+│   └── 01_enable_rls.sql    # Políticas Row Level Security para Supabase
+├── tests/                   # Suite pytest
+├── Procfile                 # Proceso web para Heroku
+├── requirements.txt         # Dependencias de Python
+└── runtime.txt              # Versión de Python para despliegue
+```
+
+## Cómo contribuir
+
+1. Haz un fork del repositorio y crea una rama descriptiva: `git checkout -b feat/mi-cambio`.
+2. Realiza tus cambios con pruebas que los respalden y ejecuta `pytest` antes de enviar.
+3. Usa mensajes de commit claros (por ejemplo, [Conventional Commits](https://www.conventionalcommits.org/es/)).
+4. Abre un Pull Request describiendo qué cambia y por qué.
+5. Nunca incluyas claves, tokens ni archivos `.env` en tus commits.
+
+## Licencia
+
+Por confirmar. El repositorio no incluye un archivo de licencia.
