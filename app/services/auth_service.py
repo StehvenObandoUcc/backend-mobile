@@ -3,7 +3,7 @@ import time
 import uuid
 from typing import Optional
 from fastapi import HTTPException, status
-from app.core.db import get_user_by_email, get_user_by_id, create_user
+from app.core.db import get_user_by_email, get_user_by_id, create_user, delete_user_account
 from app.core.security import (
     hash_password,
     verify_password,
@@ -65,6 +65,18 @@ class AuthService:
         ).isoformat()
 
         return TokenResponse(access_token=token, expires_at=expires_at, user=user_resp)
+
+    @staticmethod
+    def delete_account(token: str, password: str) -> None:
+        """Elimina la cuenta del dueño del token si la contraseña es correcta (irreversible)."""
+        current = AuthService.get_current_user_from_token(token)
+        user_record = get_user_by_id(current.id)
+        if not user_record or not verify_password(password, user_record["password_hash"]):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="La contraseña no es correcta.",
+            )
+        delete_user_account(current.id)
 
     @staticmethod
     def get_current_user_from_token(token: str) -> UserResponse:
