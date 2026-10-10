@@ -251,6 +251,27 @@ def create_user(user_id: str, email: str, name: str, password_hash: str) -> Dict
     }
 
 
+def delete_user_account(user_id: str) -> None:
+    """Borra de forma definitiva al usuario y TODOS sus datos (compras, recetas, despensa).
+    Se borra primero lo dependiente y al final el usuario, para no dejar filas huérfanas
+    aunque la base de datos no tenga ON DELETE CASCADE."""
+    sb = get_supabase()
+    if sb:
+        try:
+            for table in ("shopping_items", "recipes", "ingredients"):
+                sb.table(table).delete().eq("user_id", user_id).execute()
+            sb.table("users").delete().eq("id", user_id).execute()
+            return
+        except Exception as err:
+            _db_unavailable(err, "Error eliminando la cuenta en Supabase")
+
+    with get_connection() as conn:
+        for table in ("shopping_items", "recipes", "ingredients"):
+            conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.commit()
+
+
 # ─── Operaciones de Inventario (CRUD con persistencia y preservación de campos) ─
 
 def _row_to_ingredient_dict(row: Any) -> Dict[str, Any]:
