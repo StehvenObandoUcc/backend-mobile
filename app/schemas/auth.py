@@ -41,6 +41,10 @@ class LoginRequest(BaseModel):
             raise ValueError("Formato de correo electrónico inválido.")
         return v
 
+class DeleteAccountRequest(BaseModel):
+    """Confirmación para eliminar la cuenta: se pide la contraseña actual."""
+    password: str = Field(min_length=1, max_length=128, description="Contraseña actual del usuario")
+
 class UserResponse(BaseModel):
     id: str
     email: str
