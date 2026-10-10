@@ -3,6 +3,7 @@ import logging
 import time
 from typing import Annotated, List, Optional
 from fastapi import APIRouter, Body, Header, HTTPException, Request, status, Depends
+from app.core.language import request_language
 from app.schemas.recipe import (
     RecipeResponse,
     RecipeGenerateRequest,
@@ -176,6 +177,7 @@ async def generate_recipes(
         req.max_prep_time,
         req.count,
         (req.dietary_preference or "any").lower(),
+        request_language(request),
     )
 
     now = time.time()
@@ -191,7 +193,7 @@ async def generate_recipes(
     await check_ai_rate_limit(f"recipe_{user_id}", max_per_minute=settings.MAX_CALLS_PER_MINUTE)
     await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
     http_client = getattr(request.app.state, "http_client", None)
-    recipes = await AIRecipeService.generate_recipes(req, http_client=http_client)
+    recipes = await AIRecipeService.generate_recipes(req, http_client=http_client, language=request_language(request))
 
     # Almacenar en caché temporal (15s)
     RECIPE_CACHE[cache_key] = {"data": recipes, "timestamp": now}
@@ -211,5 +213,5 @@ async def get_recipe_steps(
     await check_ai_rate_limit(f"steps_{user_id}", max_per_minute=settings.MAX_CALLS_PER_MINUTE)
     await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
     http_client = getattr(request.app.state, "http_client", None)
-    steps = await AIRecipeService.generate_recipe_steps(req, http_client=http_client)
+    steps = await AIRecipeService.generate_recipe_steps(req, http_client=http_client, language=request_language(request))
     return RecipeStepsResponse(steps=steps)
