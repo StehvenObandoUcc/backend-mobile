@@ -9,6 +9,7 @@ from fastapi import HTTPException, status
 from pydantic import ValidationError
 
 from app.core.config import settings
+from app.core.language import language_clause
 from app.core.rate_limit import check_rate_limit
 from app.schemas.recipe import (
     RecipeResponse,
@@ -154,6 +155,7 @@ class AIRecipeService:
         cls,
         req: RecipeGenerateRequest,
         http_client: Optional[httpx.AsyncClient] = None,
+        language: str = "es",
     ) -> List[RecipeResponse]:
         """Fase 1: Genera resúmenes livianos de recetas (sin pasos) para máxima velocidad (< 2s).
         Los pasos se cargan bajo demanda en la Fase 2 cuando el usuario abre una receta específica.
@@ -290,7 +292,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
     }}
   ]
 }}
-"""
+""" + language_clause(language)
         url = f"{settings.DEEPSEEK_BASE_URL}/chat/completions"
         headers = {
             "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}",
@@ -403,6 +405,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
         cls,
         req: RecipeStepsRequest,
         http_client: Optional[httpx.AsyncClient] = None,
+        language: str = "es",
     ) -> List[str]:
         """Fase 2: Genera los pasos detallados de preparación exclusivamente cuando el usuario abre la receta."""
         if not settings.DEEPSEEK_API_KEY:
@@ -435,7 +438,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "steps" conteniendo 
     "Paso 4: Instrucción detallada..."
   ]
 }}
-"""
+""" + language_clause(language)
         url = f"{settings.DEEPSEEK_BASE_URL}/chat/completions"
         headers = {
             "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}",
