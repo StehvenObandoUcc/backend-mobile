@@ -1,7 +1,7 @@
-from fastapi import APIRouter, Header, HTTPException, Request, status
+from fastapi import APIRouter, Header, HTTPException, Request, Response, status
 from starlette.concurrency import run_in_threadpool
 from app.core.rate_limit import check_auth_rate_limit, get_client_ip
-from app.schemas.auth import RegisterRequest, LoginRequest, UserResponse, TokenResponse
+from app.schemas.auth import RegisterRequest, LoginRequest, UserResponse, TokenResponse, DeleteAccountRequest
 from app.services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -34,3 +34,19 @@ async def get_me(authorization: str = Header(None)) -> UserResponse:
         )
     token = authorization.split("Bearer ")[1].strip()
     return await run_in_threadpool(AuthService.get_current_user_from_token, token)
+
+
+@router.post("/delete-account", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_account(req: DeleteAccountRequest, request: Request, authorization: str = Header(None)) -> Response:
+    """Elimina para siempre la cuenta del usuario autenticado y todos sus datos.
+    Pide la contraseña actual y comparte el límite de intentos del login."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Falta header de autorización Bearer token.",
+        )
+    client_ip = get_client_ip(request)
+    await check_auth_rate_limit(f"delete_{client_ip}")
+    token = authorization.split("Bearer ")[1].strip()
+    await run_in_threadpool(AuthService.delete_account, token, req.password)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
