@@ -84,3 +84,36 @@ def test_get_me_with_invalid_token():
     )
     assert response.status_code == 401
     assert "Token inválido o expirado" in response.json()["detail"]
+
+
+def _register(email: str, password: str = "secreto123"):
+    res = client.post("/api/v1/auth/register", json={"email": email, "password": password, "name": "Prueba"})
+    assert res.status_code == 201
+    return {"Authorization": f"Bearer {res.json()['access_token']}"}
+
+
+def test_delete_account_wrong_password_keeps_account():
+    """POST /auth/delete-account con contraseña errada responde 401 y no borra nada."""
+    headers = _register("borrar1@foodai.com")
+    res = client.post("/api/v1/auth/delete-account", json={"password": "otraclave"}, headers=headers)
+    assert res.status_code == 401
+    assert client.get("/api/v1/auth/me", headers=headers).status_code == 200
+
+
+def test_delete_account_removes_user_and_data():
+    """Con la contraseña correcta borra la cuenta y sus datos: el login posterior falla."""
+    headers = _register("borrar2@foodai.com")
+    client.post("/api/v1/inventory", json={"name": "Tomate", "quantity": 2, "unit": "unit", "category": "vegetable"}, headers=headers)
+    res = client.post("/api/v1/auth/delete-account", json={"password": "secreto123"}, headers=headers)
+    assert res.status_code == 204
+    login = client.post("/api/v1/auth/login", json={"email": "borrar2@foodai.com", "password": "secreto123"})
+    assert login.status_code == 401
+    from app.core.db import get_connection
+    with get_connection() as conn:
+        left = conn.execute("SELECT COUNT(*) FROM ingredients WHERE user_id NOT IN (SELECT id FROM users)").fetchone()[0]
+    assert left == 0
+
+
+def test_delete_account_requires_token():
+    res = client.post("/api/v1/auth/delete-account", json={"password": "x"})
+    assert res.status_code == 401
