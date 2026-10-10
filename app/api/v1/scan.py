@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.api.v1.inventory import get_current_user_id
 from app.core.config import settings
+from app.core.language import request_language, language_clause
 from app.core.rate_limit import check_rate_limit, check_ai_rate_limit
 from app.schemas.scan import ScanResponse
 from app.schemas.ingredient import IngredientItem
@@ -58,6 +59,7 @@ async def _run_deepseek_vision(
     b64_image: str,
     mime_type: str = "image/jpeg",
     http_client: Optional[httpx.AsyncClient] = None,
+    language: str = "es",
 ) -> ScanResponse:
     """Invoca la API multimodal de DeepSeek Flash para analizar alimentos en una imagen."""
     if not settings.DEEPSEEK_API_KEY:
@@ -107,7 +109,7 @@ async def _run_deepseek_vision(
         "    }\n"
         "  ]\n"
         "}"
-    )
+    ) + language_clause(language)
 
     payload = {
         "model": settings.DEEPSEEK_MODEL,
@@ -287,4 +289,4 @@ async def scan_image(request: Request, user_id: str = Depends(get_current_user_i
         )
 
     http_client = getattr(request.app.state, "http_client", None)
-    return await _run_deepseek_vision(b64_image, mime_type, http_client=http_client)
+    return await _run_deepseek_vision(b64_image, mime_type, http_client=http_client, language=request_language(request))
