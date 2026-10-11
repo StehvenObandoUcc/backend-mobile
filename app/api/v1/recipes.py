@@ -160,6 +160,26 @@ async def batch_delete_recipes_endpoint(
     return {"status": "deleted", "count": count}
 
 
+def recipe_cache_key(req: RecipeGenerateRequest, user_id: str, language: str) -> tuple:
+    """Clave de la caché anti-doble-clic. Debe incluir al usuario y todo lo que cambia el resultado:
+    las recetas se verifican contra los ids de SU despensa y respetan SUS ingredientes a evitar."""
+    return (
+        user_id,
+        tuple(sorted(
+            (str(item.get("id", "")), item.get("name", "").strip().lower())
+            for item in req.ingredients if item.get("name")
+        )),
+        req.difficulty or "any",
+        req.focus,
+        req.max_prep_time,
+        req.count,
+        (req.dietary_preference or "any").lower(),
+        req.servings,
+        tuple(sorted(a.strip().lower() for a in req.avoid_ingredients)),
+        language,
+    )
+
+
 @router.post("/recipes/generate", response_model=List[RecipeResponse], status_code=status.HTTP_200_OK)
 @router.post("/recipes", response_model=List[RecipeResponse], status_code=status.HTTP_200_OK)
 async def generate_recipes(
@@ -170,15 +190,7 @@ async def generate_recipes(
     """Fase 1: Genera sugerencias de recetas utilizando DeepSeek Chat con variedad garantizada.
     Caché de corta duración (15s) para evitar bloqueos por doble-tap accidental sin impedir variedad.
     """
-    cache_key = (
-        tuple(sorted((item.get("name", "").strip().lower() for item in req.ingredients if item.get("name")))),
-        req.difficulty or "any",
-        req.focus,
-        req.max_prep_time,
-        req.count,
-        (req.dietary_preference or "any").lower(),
-        request_language(request),
-    )
+    cache_key = recipe_cache_key(req, user_id, request_language(request))
 
     now = time.time()
     if cache_key in RECIPE_CACHE:

@@ -18,6 +18,7 @@ from app.schemas.recipe import (
 )
 
 from app.schemas.ingredient import ALLOWED_UNITS
+from app.services.recipe_verifier import safe_id, verify_recipe
 
 UNIT_NORMALIZATION = {
     "tablespoon": ("milliliters", 15),
@@ -172,9 +173,10 @@ class AIRecipeService:
         await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
 
 
-        ingredients_desc = ", ".join(
+        ingredients_desc = "\n".join(
             [
-                f"{str(item.get('name', ''))[:60]} ({str(item.get('quantity', ''))[:10]} {str(item.get('unit', ''))[:15]})".strip()
+                f"- id={safe_id(item.get('id')) or 'sin-id'} | {str(item.get('name', ''))[:60]} "
+                f"({str(item.get('quantity', ''))[:10]} {str(item.get('unit', ''))[:15]})".strip()
                 for item in req.ingredients[:30]
                 if item.get("name")
             ]
@@ -239,8 +241,10 @@ class AIRecipeService:
         base_prompt = f"""
 Actúa como chef profesional y nutricionista. Genera EXACTAMENTE {count} recetas DIFERENTES basadas en los ingredientes del usuario.
 
-Ingredientes disponibles en inventario:
+Ingredientes disponibles en inventario (cada uno con su id):
 {ingredients_desc or "Ingredientes comunes (huevos, tomate, cebolla, pollo, queso, pasta)"}
+
+REGLA DE IDENTIDAD (obligatoria): en "availableIngredients" SOLO puedes poner ingredientes de la lista anterior y DEBES copiar su id exacto en "inventoryIngredientId". Nunca pongas allí un ingrediente que no esté en la lista; todo lo demás va en "missingIngredients" con "inventoryIngredientId": null. Nunca uses más cantidad que la indicada en la lista.
 
 Criterios de Plausibilidad y Armonía Culinaria:
 1. Sentido Gastronómico Real: Cada receta debe ser plausible, apetitosa y pertenecer a una tradición o práctica culinaria reconocible.
@@ -283,10 +287,10 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
       "difficulty": "easy",
       "matchScore": 95,
       "availableIngredients": [
-        {{"id": "av-1", "name": "Nombre ingrediente", "quantity": 1, "unit": "units", "isAvailable": true, "isOptional": false, "substitutions": []}}
+        {{"id": "av-1", "inventoryIngredientId": "<id de la lista>", "name": "Nombre ingrediente", "quantity": 1, "unit": "units", "isAvailable": true, "isOptional": false, "substitutions": []}}
       ],
       "missingIngredients": [
-        {{"id": "ms-1", "name": "Aceite de oliva", "quantity": 30, "unit": "milliliters", "isAvailable": false, "isOptional": true, "substitutions": ["Mantequilla"]}}
+        {{"id": "ms-1", "inventoryIngredientId": null, "name": "Aceite de oliva", "quantity": 30, "unit": "milliliters", "isAvailable": false, "isOptional": true, "substitutions": ["Mantequilla"]}}
       ],
       "steps": []
     }}
@@ -361,6 +365,11 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
                 is_valid, reason = validate_recipe_sanity(r)
                 if not is_valid:
                     raise ValueError(reason or "Fallo de coherencia gastronómica")
+                # Verificación contra la despensa real (ingredientes inventados, cantidades, evitar, uso mínimo)
+                is_verified, verify_reason = verify_recipe(r, req.ingredients, req.avoid_ingredients)
+                if not is_verified:
+                    logger.warning(f"[AIRecipeService] Receta descartada por la despensa: {verify_reason}")
+                    raise ValueError(verify_reason or "La receta no coincide con la despensa")
 
             return parsed_recipes
 
