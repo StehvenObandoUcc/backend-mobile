@@ -210,3 +210,64 @@ def verify_recipe(
     if repairs:
         logger.info("[Verifier] reparaciones en «%s»: %s", recipe.title, "; ".join(repairs))
     return VerifyResult(True, None, repairs)
+
+
+# ── Fase 2 · Pasos de preparación ────────────────────────────────────────────────
+# Alimentos comunes que, si aparecen en un paso sin estar en la receta, indican un ingrediente ajeno.
+# Lista deliberadamente conservadora (solo alimentos inequívocos) para no dar falsos positivos.
+_FOOD_WORDS = {
+    "pollo", "pechuga", "carne", "cerdo", "tocino", "jamon", "chorizo", "salchicha", "pescado", "salmon",
+    "atun", "tilapia", "camaron", "huevo", "leche", "queso", "mantequilla", "crema", "yogur", "arroz",
+    "pasta", "fideo", "harina", "papa", "yuca", "platano", "aguacate", "tomate", "cebolla", "ajo",
+    "zanahoria", "brocoli", "pimenton", "lechuga", "pepino", "espinaca", "champinon", "maiz", "frijol",
+    "lenteja", "garbanzo", "limon", "naranja", "manzana", "mango", "fresa", "cilantro", "perejil",
+    "mani", "nuez", "almendra", "chocolate", "miel", "coco", "avena",
+    "chicken", "beef", "pork", "bacon", "ham", "fish", "shrimp", "egg", "milk", "cheese", "butter",
+    "cream", "yogurt", "rice", "flour", "potato", "tomato", "onion", "garlic", "carrot", "broccoli",
+    "lettuce", "cucumber", "spinach", "corn", "bean", "lentil", "lemon", "orange", "apple", "parsley",
+    "peanut", "almond", "honey", "oat",
+}
+_FOOD_VARIANTS = [_variants(w) for w in _FOOD_WORDS]
+
+
+@dataclass
+class StepsResult:
+    avoid_hit: Optional[str] = None  # seguridad: ingrediente a evitar mencionado
+    foreign: List[str] = field(default_factory=list)  # alimentos que no están en la receta
+
+    @property
+    def ok(self) -> bool:
+        return not self.avoid_hit and not self.foreign
+
+    def reason(self) -> Optional[str]:
+        if self.avoid_hit:
+            return f"Los pasos mencionan «{self.avoid_hit}», que el usuario pidió evitar"
+        if self.foreign:
+            return "Los pasos usan ingredientes que no están en la receta: " + ", ".join(self.foreign[:5])
+        return None
+
+
+def verify_steps(steps: List[str], allowed_texts: List[Any], avoid: Optional[List[str]] = None) -> StepsResult:
+    """Revisa los pasos contra la lista cerrada de la receta. Cero red: solo reglas.
+
+    `allowed_texts`: título, descripción y nombres de ingredientes (disponibles y faltantes).
+    """
+    res = StepsResult()
+    for term in [a for a in (avoid or []) if _norm(a)]:
+        for step in steps:
+            if names_overlap(term, step):
+                res.avoid_hit = term
+                return res
+
+    allowed = [v for text in allowed_texts for v in _tokens(text)]
+    staples = [_variants(s) for s in STAPLES]
+    seen = set()
+    for step in steps:
+        for word in _norm(step).split():
+            if len(word) < 3 or word in STOP_WORDS or word in seen:
+                continue
+            wv = _variants(word)
+            if any(wv & f for f in _FOOD_VARIANTS) and not any(wv & a for a in allowed) and not any(wv & st for st in staples):
+                seen.add(word)
+                res.foreign.append(word)
+    return res

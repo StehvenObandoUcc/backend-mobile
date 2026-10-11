@@ -15,6 +15,12 @@ class RecipeResponse(BaseModel):
     steps: List[str] = Field(default_factory=list)
     isSaved: bool = False
     isPrepared: bool = False
+    # Foto real verificada (Unsplash). Opcionales: las apps viejas simplemente los ignoran.
+    imageUri: Optional[str] = None
+    imageCredit: Optional[Dict[str, str]] = None
+    # Términos genéricos en inglés para buscar la foto
+    dishNameEn: Optional[str] = None
+    mainIngredientsEn: List[str] = Field(default_factory=list)
 
 
 class RecipeGenerateRequest(BaseModel):
@@ -106,6 +112,12 @@ class RecipeStepsRequest(BaseModel):
     availableIngredients: List[Dict[str, Any]] = Field(default_factory=list, max_length=50)
     missingIngredients: List[Dict[str, Any]] = Field(default_factory=list, max_length=50)
     difficulty: Optional[str] = Field(default="easy", max_length=20)
+    avoid_ingredients: List[str] = Field(default_factory=list, max_length=20)
+
+    @field_validator("avoid_ingredients")
+    @classmethod
+    def sanitize_avoid(cls, items: List[str]) -> List[str]:
+        return [n for n in (re.sub(r"[\r\n\t]+", " ", str(x)).strip()[:40] for x in items[:20]) if n]
 
 
 class RecipeStepsResponse(BaseModel):

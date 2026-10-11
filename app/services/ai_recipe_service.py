@@ -3,7 +3,7 @@ import logging
 import re
 import unicodedata
 import uuid
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from fastapi import HTTPException, status
 from pydantic import ValidationError
@@ -18,7 +18,7 @@ from app.schemas.recipe import (
 )
 
 from app.schemas.ingredient import ALLOWED_UNITS
-from app.services.recipe_verifier import safe_id, verify_recipe
+from app.services.recipe_verifier import safe_id, verify_recipe, verify_steps
 
 UNIT_NORMALIZATION = {
     "tablespoon": ("milliliters", 15),
@@ -150,6 +150,21 @@ def validate_recipe_sanity(recipe: RecipeResponse) -> Tuple[bool, Optional[str]]
     return True, None
 
 
+def _clean_english_term(value: Any) -> str:
+    """Sanea un término en inglés para buscar fotos: solo letras, espacios y guiones; minúscula; máx. 60."""
+    if not isinstance(value, str):
+        return ""
+    text = unicodedata.normalize("NFD", value.lower())
+    text = "".join(c for c in text if unicodedata.category(c) != "Mn")
+    text = re.sub(r"[^a-z\- ]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip(" -")[:60].strip()
+
+
+def _clean_title_for_prompt(value: Any) -> str:
+    """Sanea un título que se inyecta en el prompt (sin saltos de línea ni comillas, máx. 80)."""
+    return re.sub(r"\s+", " ", re.sub(r"[\"`{}\[\]]+", " ", str(value))).strip()[:80]
+
+
 class AIRecipeService:
     @classmethod
     async def generate_recipes(
@@ -157,6 +172,7 @@ class AIRecipeService:
         req: RecipeGenerateRequest,
         http_client: Optional[httpx.AsyncClient] = None,
         language: str = "es",
+        exclude_titles: Optional[List[str]] = None,
     ) -> List[RecipeResponse]:
         """Fase 1: Genera resúmenes livianos de recetas (sin pasos) para máxima velocidad (< 2s).
         Los pasos se cargan bajo demanda en la Fase 2 cuando el usuario abre una receta específica.
@@ -227,6 +243,12 @@ class AIRecipeService:
             else ""
         )
 
+        exclude_clause = ""
+        if exclude_titles:
+            titles = [t for t in (_clean_title_for_prompt(x) for x in exclude_titles[:10]) if t]
+            if titles:
+                exclude_clause = "- No repitas estos platos: " + "; ".join(titles) + "."
+
         single_clause = ""
         if len(req.ingredients) == 1:
             single_name = str(req.ingredients[0].get("name", "")).strip()
@@ -270,10 +292,12 @@ Restricciones:
 {dietary_clause}
 {servings_clause}
 {avoid_clause}
+{exclude_clause}
 {single_clause}
 - matchScore: Porcentaje entero entre 60 y 100 según ingredientes disponibles.
 - Unidades permitidas para 'unit': ÚNICAMENTE 'units', 'grams', 'kilograms', 'milliliters', 'liters', 'package', 'unknown'.
 - PROHIBIDO usar tablespoons, teaspoons, pinch, cups, cucharadas ni pizcas. Para aceites o líquidos usa milliliters (ej. 30 milliliters en vez de 2 tablespoons); para especias o polvos usa grams o package (ej. 5 grams en vez de 1 teaspoon); para piezas enteras usa units.
+- "dishNameEn": nombre genérico del plato en inglés (ej. "tomato scrambled eggs"); "mainIngredientsEn": de 1 a 3 ingredientes protagonistas en inglés, genéricos y en minúscula (ej. ["egg", "tomato"]). Sirven para buscar una foto del plato.
 - IMPORTANTE: No generes pasos de preparación en esta fase para optimizar la velocidad de respuesta. Deja el arreglo "steps" vacío [].
 
 Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
@@ -286,6 +310,8 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
       "servings": {req.servings or 2},
       "difficulty": "easy",
       "matchScore": 95,
+      "dishNameEn": "tomato scrambled eggs",
+      "mainIngredientsEn": ["egg", "tomato"],
       "availableIngredients": [
         {{"id": "av-1", "inventoryIngredientId": "<id de la lista>", "name": "Nombre ingrediente", "quantity": 1, "unit": "units", "isAvailable": true, "isOptional": false, "substitutions": []}}
       ],
@@ -344,6 +370,16 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
             for item in recipe_list[:count]:
                 raw_available = item.get("availableIngredients", [])
                 raw_missing = item.get("missingIngredients", [])
+                dish_en = _clean_english_term(item.get("dishNameEn")) or None
+                raw_main = item.get("mainIngredientsEn")
+                main_en: List[str] = []
+                if isinstance(raw_main, list):
+                    for m in raw_main:
+                        term = _clean_english_term(m)
+                        if term and term not in main_en:
+                            main_en.append(term)
+                        if len(main_en) >= 3:
+                            break
                 rec = RecipeResponse(
                     id=f"rec-ai-{uuid.uuid4().hex[:6]}",
                     title=str(item.get("title", "Receta sugerida")).strip(),
@@ -357,6 +393,8 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
                     steps=[],
                     isSaved=False,
                     isPrepared=False,
+                    dishNameEn=dish_en,
+                    mainIngredientsEn=main_en,
                 )
                 parsed_recipes.append(rec)
 
@@ -416,7 +454,11 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
         http_client: Optional[httpx.AsyncClient] = None,
         language: str = "es",
     ) -> List[str]:
-        """Fase 2: Genera los pasos detallados de preparación exclusivamente cuando el usuario abre la receta."""
+        """Fase 2: pasos de preparación al abrir la receta, con lista cerrada de ingredientes y verificación.
+
+        Tope duro: 1 intento + 1 reintento con el motivo exacto. Un ingrediente a evitar en los pasos
+        nunca se entrega (422); un alimento ajeno que persiste tras el reintento se entrega y se registra.
+        """
         if not settings.DEEPSEEK_API_KEY:
             logger.error("[AIRecipeService] DEEPSEEK_API_KEY no está configurada en las variables de entorno.")
             raise HTTPException(
@@ -426,18 +468,34 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
 
         await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
 
+        def _line(ing: Dict[str, Any]) -> str:
+            qty, unit = ing.get("quantity"), ing.get("unit")
+            amount = f" ({qty} {unit})" if qty not in (None, "") and unit else ""
+            return f"- {ing.get('name', '')}{amount}"
 
-        available_desc = ", ".join([ing.get("name", "") for ing in req.availableIngredients if ing.get("name")])
-        missing_desc = ", ".join([ing.get("name", "") for ing in req.missingIngredients if ing.get("name")])
+        available = [i for i in req.availableIngredients if isinstance(i, dict) and i.get("name")]
+        missing = [i for i in req.missingIngredients if isinstance(i, dict) and i.get("name")]
+        allowed_texts = [req.title, req.description] + [i["name"] for i in available + missing]
+        avoid_clause = (
+            "\nIngredientes PROHIBIDOS (el usuario no los come o le dan alergia; no los menciones ni como opcionales): "
+            + ", ".join(req.avoid_ingredients)
+            if req.avoid_ingredients
+            else ""
+        )
 
-        prompt = f"""
+        def build_prompt(note: str = "") -> str:
+            return f"""
 Actúa como chef profesional. Genera las instrucciones de preparación paso a paso para esta receta:
 Título: {req.title}
 Descripción: {req.description}
 Dificultad: {req.difficulty}
-Ingredientes principales: {available_desc or 'Ingredientes estándar'}
-Ingredientes complementarios: {missing_desc or 'Ninguno'}
+Ingredientes disponibles:
+{chr(10).join(_line(i) for i in available) or '- (ninguno)'}
+Ingredientes complementarios:
+{chr(10).join(_line(i) for i in missing) or '- (ninguno)'}
 
+REGLA DE LISTA CERRADA (obligatoria): usa SOLO los ingredientes de las dos listas anteriores, más los básicos sal, agua, aceite, pimienta y azúcar. No agregues ningún otro alimento, ni siquiera como adorno u opción.{avoid_clause}
+{note}
 Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "steps" conteniendo un arreglo de 4 a 6 pasos claros y concisos:
 {{
   "steps": [
@@ -448,6 +506,30 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "steps" conteniendo 
   ]
 }}
 """ + language_clause(language)
+
+        note = ""
+        for attempt in (1, 2):
+            steps = await cls._request_steps(build_prompt(note), http_client)
+            check = verify_steps(steps, allowed_texts, req.avoid_ingredients)
+            if check.ok:
+                return steps
+            reason = check.reason() or ""
+            if attempt == 1:
+                logger.warning(f"[AIRecipeService] Pasos rechazados ({reason}). Reintento correctivo único...")
+                note = f"\nNOTA DE CORRECCIÓN: tu respuesta anterior fue rechazada. Motivo: {reason}. Corrígelo respetando la lista cerrada."
+                continue
+            if check.avoid_hit:
+                logger.error(f"[AIRecipeService] Pasos con ingrediente a evitar tras reintento: {reason}")
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="No pudimos generar unos pasos seguros para esta receta. Intenta de nuevo.",
+                )
+            logger.warning(f"[AIRecipeService] Pasos con alimentos ajenos tras reintento (se entregan): {reason}")
+            return steps
+        return steps  # pragma: no cover
+
+    @classmethod
+    async def _request_steps(cls, prompt: str, http_client: Optional[httpx.AsyncClient]) -> List[str]:
         url = f"{settings.DEEPSEEK_BASE_URL}/chat/completions"
         headers = {
             "Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}",

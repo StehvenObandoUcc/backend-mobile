@@ -234,3 +234,59 @@ def test_cache_key_is_per_user_and_includes_ids_and_avoid():
     other_ids = [{**p, "id": p["id"] + "x"} for p in PANTRY]
     assert k != recipe_cache_key(RecipeGenerateRequest(ingredients=other_ids, count=1), "user-a", "es")
     assert k != recipe_cache_key(RecipeGenerateRequest(ingredients=PANTRY, count=1, servings=4), "user-a", "es")
+
+
+# ── Fase 2 · pasos verificados ──
+from app.schemas.recipe import RecipeStepsRequest  # noqa: E402
+from app.services.recipe_verifier import verify_steps  # noqa: E402
+
+ALLOWED = ["Huevos con tomate", "Un desayuno rápido", "Tomates", "Huevos", "Pan"]
+
+
+def test_steps_ok_with_staples_and_title_words():
+    r = verify_steps(["Bate los huevos con sal.", "Fríe el tomate en aceite.", "Sirve con pan."], ALLOWED, [])
+    assert r.ok, r.reason()
+
+
+def test_steps_foreign_food_detected_with_plural_and_accents():
+    r = verify_steps(["Agrega queso rallado y cebollas."], ALLOWED, [])
+    assert not r.ok and set(r.foreign) == {"queso", "cebollas"}
+
+
+def test_steps_avoid_hit_whole_word_only():
+    assert verify_steps(["Sirve con sal."], ALLOWED, ["sal"]).avoid_hit == "sal"  # si evita la sal, ni como básico
+    assert verify_steps(["Añade maní triturado."], ALLOWED, ["maní"]).avoid_hit == "maní"
+    assert verify_steps(["Hornea el salmón."], ["Salmón"], ["sal"]).avoid_hit is None
+
+
+def _steps_req(**kw):
+    return RecipeStepsRequest(
+        title="Huevos con tomate", description="Un desayuno rápido",
+        availableIngredients=[{"name": "Tomates", "quantity": 200, "unit": "grams"}, {"name": "Huevos", "quantity": 3, "unit": "units"}],
+        missingIngredients=[], **kw,
+    )
+
+
+def test_service_steps_prompt_is_closed_list_and_retries_once_on_foreign():
+    bad = {"steps": ["Pica el tomate.", "Agrega queso.", "Bate los huevos.", "Cocina todo."]}
+    good = {"steps": ["Pica el tomate.", "Bate los huevos.", "Cocina todo.", "Sirve."]}
+    client = _FakeClient([bad, good])
+    out = asyncio.run(AIRecipeService.generate_recipe_steps(_steps_req(), http_client=client))
+    assert out == good["steps"] and len(client.prompts) == 2
+    assert "REGLA DE LISTA CERRADA" in client.prompts[0] and "queso" in client.prompts[1]
+
+
+def test_service_steps_delivers_foreign_after_retry_but_never_avoided():
+    from fastapi import HTTPException
+
+    bad = {"steps": ["Pica el tomate.", "Agrega queso.", "Bate los huevos.", "Sirve."]}
+    client = _FakeClient([bad, bad])
+    out = asyncio.run(AIRecipeService.generate_recipe_steps(_steps_req(), http_client=client))
+    assert len(client.prompts) == 2 and out == bad["steps"]  # tope duro
+
+    unsafe = {"steps": ["Pica el tomate.", "Agrega maní.", "Bate los huevos.", "Sirve."]}
+    client = _FakeClient([unsafe, unsafe])
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(AIRecipeService.generate_recipe_steps(_steps_req(avoid_ingredients=["maní"]), http_client=client))
+    assert exc.value.status_code == 422 and len(client.prompts) == 2
+    assert "PROHIBIDOS" in client.prompts[0]
