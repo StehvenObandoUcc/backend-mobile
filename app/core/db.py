@@ -5,6 +5,7 @@ import datetime
 import json
 import uuid
 from typing import Optional, Dict, Any, List
+from urllib.parse import urlparse
 from fastapi import HTTPException, status
 from app.core.config import settings
 
@@ -775,9 +776,18 @@ def _row_to_recipe_dict(row: Any) -> Dict[str, Any]:
 _IMAGE_CREDIT_KEYS = ("source", "name", "profileUrl", "sourceUrl")
 
 
+def _https_host_is(value: Any, host: str) -> bool:
+    """https y host EXACTO (rechaza «images.unsplash.com.evil.com», usuarios@ y otros esquemas)."""
+    try:
+        parsed = urlparse(value)
+        return parsed.scheme == "https" and parsed.hostname == host and parsed.username is None
+    except ValueError:
+        return False
+
+
 def _sanitize_image_uri(value: Any) -> Optional[str]:
-    """Acepta solo URLs https de hasta 2000 caracteres; cualquier otra cosa se descarta."""
-    if isinstance(value, str) and value.startswith("https://") and len(value) <= 2000:
+    """Acepta solo https://images.unsplash.com/... de hasta 2000 caracteres; cualquier otra cosa se descarta."""
+    if isinstance(value, str) and len(value) <= 2000 and _https_host_is(value, "images.unsplash.com"):
         return value
     return None
 
@@ -792,7 +802,7 @@ def _sanitize_image_credit(value: Any) -> Optional[str]:
         if isinstance(value.get(k), str)
         and value[k]
         and len(value[k]) <= 300
-        and (k not in ("profileUrl", "sourceUrl") or value[k].startswith("https://"))
+        and (k not in ("profileUrl", "sourceUrl") or _https_host_is(value[k], "unsplash.com"))
     }
     return json.dumps(clean) if clean else None
 
