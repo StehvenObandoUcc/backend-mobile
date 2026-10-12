@@ -36,6 +36,10 @@ def _vision(is_food=True, matches=True):
     return _Resp(200, {"choices": [{"message": {"content": json.dumps(payload)}}]})
 
 
+def _vision_raw(content, finish_reason="stop"):
+    return _Resp(200, {"choices": [{"finish_reason": finish_reason, "message": {"content": content}}]})
+
+
 def _photo(pid="p1", alt="scrambled eggs with tomato on a plate", desc=None, tags=None):
     return {
         "id": pid,
@@ -124,7 +128,7 @@ def test_vision_approval_sets_image_credit_and_pings_download():
     assert client.searches[0] == {"query": "tomato scrambled eggs", "per_page": 5, "orientation": "landscape", "content_filter": "high"}
     assert client.search_headers_seen[0] == {"Authorization": "Client-ID u-key", "Accept-Version": "v1"}
     payload = client.vision_payloads[0]
-    assert payload["max_tokens"] == 150 and payload["temperature"] == 0
+    assert payload["max_tokens"] == 1024 and payload["temperature"] == 0
     assert payload["response_format"] == {"type": "json_object"}
     image_part = payload["messages"][0]["content"][1]
     assert image_part == {"type": "image_url", "image_url": {"url": "https://images.unsplash.com/p1-small", "detail": "low"}}
@@ -185,44 +189,69 @@ def test_text_filter_accepts_plurals_and_accents():
     assert r.imageUri is not None
 
 
-# ── Solo texto ──
-def test_vision_cap_exhausted_uses_text_rule(monkeypatch):
+# ── Sin verificación de visión = sin foto ──
+def test_vision_cap_exhausted_means_no_photo_and_zero_unsplash_searches(monkeypatch):
     monkeypatch.setattr(settings, "VISION_DAILY_CAP", 0, raising=False)
     client = _FakeClient(default=[_photo(alt="eggs with tomato")], vision=[])
-    ok = _recipe()
-    stats = _run([ok], client)
-    assert ok.imageUri is not None and stats["approved_text"] == 1 and stats["vision_calls"] == 0
-
-    recipe_photo._reset_state_for_tests()
-    one_match = _FakeClient(default=[_photo(alt="scrambled eggs on toast")], vision=[])
-    weak = _recipe()
-    _run([weak], one_match)
-    assert weak.imageUri is None  # 1 coincidencia con 2 protagonistas: se rechaza
+    r = _recipe()
+    stats = _run([r], client)
+    assert r.imageUri is None and stats["vision_calls"] == 0 and stats["no_photo"] == 1
+    assert client.searches == [] and stats["searches"] == 0 and client.vision_payloads == []
+    assert len(recipe_photo._NEGATIVE_CACHE) == 0
+    assert not recipe_photo.photos_available()
 
 
-def test_text_rule_single_protagonist_needs_one_match(monkeypatch):
-    monkeypatch.setattr(settings, "VISION_DAILY_CAP", 0, raising=False)
-    client = _FakeClient(default=[_photo(alt="a ripe avocado")], vision=[])
-    r = _recipe(dish="avocado toast", mains=("avocado",))
-    _run([r], client)
-    assert r.imageUri is not None
-
-
-def test_vision_failure_falls_back_to_text_rule_and_counts_toward_cap():
+def test_vision_failure_leaves_no_photo_counts_toward_cap_and_is_not_cached():
     client = _FakeClient(default=[_photo(alt="eggs with tomato")], vision=RuntimeError("falló"))
     r = _recipe()
     stats = _run([r], client)
-    assert r.imageUri is not None
-    assert stats["vision_calls"] == 1 and stats["approved_text"] == 1 and stats["approved_vision"] == 0
+    assert r.imageUri is None
+    assert stats["vision_calls"] == 1 and stats["vision_failed"] == 1 and stats["approved_vision"] == 0
     assert recipe_photo._vision_state["count"] == 1
+    assert len(recipe_photo._NEGATIVE_CACHE) == 0 and len(recipe_photo._POSITIVE_CACHE) == 0
 
 
-def test_no_deepseek_key_uses_text_rule(monkeypatch):
+def test_no_deepseek_key_means_no_photo_and_zero_searches(monkeypatch):
     monkeypatch.setattr(settings, "DEEPSEEK_API_KEY", "", raising=False)
     client = _FakeClient(default=[_photo(alt="eggs with tomato")], vision=[])
     r = _recipe()
     stats = _run([r], client)
-    assert r.imageUri is not None and stats["approved_text"] == 1 and client.vision_payloads == []
+    assert r.imageUri is None and client.vision_payloads == [] and client.searches == []
+    assert stats["searches"] == 0 and not recipe_photo.photos_available()
+
+
+def test_vision_response_wrapped_in_markdown_fence_is_approved():
+    content = '```json\n{"is_food_dish": true, "matches": true, "reason": "ok"}\n```'
+    client = _FakeClient(default=[_photo()], vision=[_vision_raw(content)])
+    r = _recipe()
+    stats = _run([r], client)
+    assert r.imageUri is not None and stats["approved_vision"] == 1 and stats["vision_failed"] == 0
+
+
+def test_vision_response_with_json_object_inside_text_is_approved():
+    content = 'Veo un plato.\n{"is_food_dish": true, "matches": true, "reason": "tiene {llaves} y \\"comillas\\""}\nFin.'
+    client = _FakeClient(default=[_photo()], vision=[_vision_raw(content)])
+    r = _recipe()
+    _run([r], client)
+    assert r.imageUri is not None
+
+
+def test_vision_empty_content_means_no_photo_and_logs_finish_reason(caplog):
+    client = _FakeClient(default=[_photo()], vision=[_vision_raw("", finish_reason="length")])
+    r = _recipe()
+    with caplog.at_level("WARNING", logger="app.services.recipe_photo"):
+        stats = _run([r], client)
+    assert r.imageUri is None and stats["vision_failed"] == 1
+    assert any("finish_reason=length" in rec.getMessage() for rec in caplog.records)
+    assert not any("d-key" in rec.getMessage() for rec in caplog.records)
+
+
+def test_vision_failure_log_has_only_first_120_chars_of_content(caplog):
+    client = _FakeClient(default=[_photo()], vision=[_vision_raw("x" * 500)])
+    with caplog.at_level("WARNING", logger="app.services.recipe_photo"):
+        _run([_recipe()], client)
+    msg = next(rec.getMessage() for rec in caplog.records if "Visión inválida" in rec.getMessage())
+    assert "x" * 120 in msg and "x" * 121 not in msg
 
 
 # ── Sin clave, bloqueo, tiempo ──
@@ -411,7 +440,7 @@ def _endpoint_env(monkeypatch, rounds, photo_for):
         titles = rounds[len(calls) - 1]
         return [_recipe(title=t) for t in titles]
 
-    async def fake_attach(recipes, http_client=None):
+    async def fake_attach(recipes, http_client=None, reasons=None, used_ids=None):
         for r in recipes:
             if photo_for(r.title):
                 r.imageUri = f"https://img/{r.title}"
@@ -488,11 +517,11 @@ def test_endpoint_caches_final_result_with_photos(monkeypatch):
     _Resp(200, {"choices": [{"message": {"content": json.dumps({"reason": "sin campos"})}}]}),
     _Resp(200, {"choices": []}),
 ])
-def test_invalid_vision_json_falls_back_to_text_rule(bad):
+def test_invalid_vision_json_means_no_photo(bad):
     client = _FakeClient(default=[_photo(alt="eggs with tomato")], vision=[bad])
     r = _recipe()
     stats = _run([r], client)
-    assert r.imageUri is not None and stats["approved_text"] == 1 and stats["vision_calls"] == 1
+    assert r.imageUri is None and stats["vision_failed"] == 1 and stats["vision_calls"] == 1
 
 
 def test_vision_cap_one_with_three_parallel_recipes_makes_exactly_one_vision_call(monkeypatch):
@@ -530,7 +559,7 @@ def test_download_location_with_other_host_is_not_called():
         assert r.imageUri is not None and client.downloads == []
 
 
-def test_text_rule_rejection_is_not_negatively_cached(monkeypatch):
+def test_no_vision_quota_is_not_negatively_cached(monkeypatch):
     monkeypatch.setattr(settings, "VISION_DAILY_CAP", 0, raising=False)
     client = _FakeClient(default=[_photo(alt="scrambled eggs on toast")], vision=[_vision()])
     _run([_recipe()], client)
@@ -581,3 +610,199 @@ def test_endpoint_photo_required_with_unsplash_blocked_skips_extra_round(monkeyp
     recipe_photo._block_unsplash("prueba")
     out = _call_endpoint(count=2)
     assert [r.title for r in out] == ["A"] and len(calls) == 1
+
+
+
+# ── Fase 3c: filtro de texto ampliado y fotos sin repetir en el lote ──
+def test_sandwich_photo_is_discarded_for_omelette_dish():
+    sandwich = _photo("sw", alt="tomato and onion sandwich on a board")
+    client = _FakeClient(default=[sandwich], vision=[])
+    r = _recipe(dish="tomato onion omelette", mains=("tomato", "onion"))
+    _run([r], client)
+    assert r.imageUri is None and client.vision_payloads == []
+
+
+def test_sandwich_allowed_when_it_is_part_of_the_dish():
+    sandwich = _photo("sw", alt="tomato and onion sandwich on a board")
+    client = _FakeClient(default=[sandwich], vision=[_vision()])
+    r = _recipe(dish="tomato onion sandwich", mains=("tomato", "onion"))
+    _run([r], client)
+    assert r.imageUri == "https://images.unsplash.com/sw-regular"
+
+
+def test_egg_is_contradiction_only_when_not_protagonist_nor_in_dish():
+    eggs = _photo("eg", alt="scrambled eggs with tomato and onion")
+    c1 = _FakeClient(default=[eggs], vision=[])
+    r1 = _recipe(dish="tomato onion stew", mains=("tomato", "onion"))
+    _run([r1], c1)
+    assert r1.imageUri is None and c1.vision_payloads == []
+    recipe_photo._reset_state_for_tests()
+    c2 = _FakeClient(default=[eggs], vision=[_vision()])
+    r2 = _recipe(dish="tomato onion eggs", mains=("tomato", "onion"))
+    _run([r2], c2)
+    assert r2.imageUri is not None
+
+
+def test_candidates_are_sorted_by_score_and_ties_keep_original_order():
+    results = [_photo("a", alt="tomato"), _photo("b", alt="egg and tomato"), _photo("c", alt="egg and tomato")]
+    ranked = recipe_photo._filter_candidates(results, ["egg", "tomato"], "")
+    assert [p["id"] for p, _ in ranked] == ["b", "c", "a"]
+
+
+def test_same_candidate_in_one_batch_is_never_reused():
+    first, second = _photo("one", alt="eggs with tomato"), _photo("two", alt="tomato and eggs bowl")
+    client = _FakeClient(default=[first, second], vision=[_vision(), _vision()])
+    r1, r2 = _recipe(dish="dish a"), _recipe(dish="dish b")
+    stats = _run([r1, r2], client)
+    assert {r1.imageUri, r2.imageUri} == {"https://images.unsplash.com/one-regular", "https://images.unsplash.com/two-regular"}
+    assert stats["approved_vision"] == 2
+
+
+def test_second_recipe_without_other_candidate_has_no_photo():
+    client = _FakeClient(default=[_photo("one", alt="eggs with tomato")], vision=[_vision(), _vision()])
+    r1, r2 = _recipe(dish="dish a"), _recipe(dish="dish b")
+    reasons = []
+    stats = asyncio.run(attach_photos([r1, r2], http_client=client, reasons=reasons))
+    assert r1.imageUri is not None and r2.imageUri is None
+    assert reasons == ["aprobada", "repetida"] and stats["vision_calls"] == 1 and stats["no_photo"] == 1
+
+
+def test_positive_cache_with_photo_already_used_in_batch_is_no_photo():
+    client = _FakeClient(default=[_photo("one", alt="eggs with tomato")], vision=[_vision()])
+    _run([_recipe(dish="dish a")], client)  # llena la caché positiva
+    # Mismo lote: una receta distinta se queda con la foto; la otra (caché positiva, misma foto) queda sin foto
+    other = _recipe(dish="dish b", mains=("egg", "tomato"))
+    cached = _recipe(dish="dish a")
+    reasons = []
+    client.vision = [_vision()]
+    asyncio.run(attach_photos([other, cached], http_client=client, reasons=reasons))
+    assert other.imageUri is not None and cached.imageUri is None
+    assert reasons == ["aprobada", "repetida"]
+    assert len(client.searches) == 2  # una de la primera ronda y una de «dish b»; la repetida no buscó más
+
+
+def test_reasons_cover_no_protagonists_vision_no_and_no_candidates():
+    client = _FakeClient(default=[_photo()], vision=[_vision(matches=False)])
+    reasons = []
+    asyncio.run(attach_photos([_recipe(mains=()), _recipe(dish="x y", mains=("rice",)), _recipe()], http_client=client, reasons=reasons))
+    assert reasons == ["sin_protagonistas", "sin_candidatas", "vision_no"]
+
+
+def test_reason_time_budget_is_tiempo_agotado(monkeypatch):
+    monkeypatch.setattr(settings, "PHOTO_TIME_BUDGET_SECONDS", 0.05, raising=False)
+    client = _FakeClient(default=[_photo()], vision=[_vision()], delay=1.0)
+    reasons = []
+    asyncio.run(attach_photos([_recipe()], http_client=client, reasons=reasons))
+    assert reasons == ["tiempo_agotado"]
+
+
+# ── Revisión Fase 3c ──
+def test_endpoint_extra_round_does_not_repeat_photo_of_first_round(monkeypatch):
+    monkeypatch.setattr(settings, "PHOTO_REQUIRED", True, raising=False)
+    one, two = _photo("one", alt="eggs with tomato"), _photo("two", alt="tomato and eggs bowl")
+    client = _FakeClient(
+        by_query={"dish a": [one], "dish b": [one], "dish c": [one, two]},
+        vision=[_vision(), _vision()],
+    )
+    rounds = [[("A", "dish a"), ("B", "dish b")], [("C", "dish c")]]
+    calls = []
+
+    async def fake_generate(req, http_client=None, language="es", exclude_titles=None):
+        calls.append(req.count)
+        return [_recipe(title=t, dish=d) for t, d in rounds[len(calls) - 1]]
+
+    async def _no_limit(*a, **k):
+        return None
+
+    monkeypatch.setattr(recipes_api.AIRecipeService, "generate_recipes", staticmethod(fake_generate))
+    monkeypatch.setattr(recipes_api, "check_ai_rate_limit", _no_limit)
+    monkeypatch.setattr(recipes_api, "check_rate_limit", _no_limit)
+    recipes_api.RECIPE_CACHE.clear()
+    request = SimpleNamespace(headers={}, app=SimpleNamespace(state=SimpleNamespace(http_client=client)))
+    out = asyncio.run(recipes_api.generate_recipes(RecipeGenerateRequest(ingredients=PANTRY, count=2), request, user_id="u1"))
+    assert [r.title for r in out] == ["A", "C"]
+    assert [r.imageUri for r in out] == ["https://images.unsplash.com/one-regular", "https://images.unsplash.com/two-regular"]
+
+
+def test_used_ids_param_is_shared_and_updated():
+    client = _FakeClient(default=[_photo("one", alt="eggs with tomato")], vision=[_vision(), _vision()])
+    used = set()
+    r1, r2 = _recipe(dish="dish a"), _recipe(dish="dish b")
+    asyncio.run(attach_photos([r1], http_client=client, used_ids=used))
+    assert used == {"one"} and r1.imageUri is not None
+    asyncio.run(attach_photos([r2], http_client=client, used_ids=used))
+    assert r2.imageUri is None
+
+
+def test_vision_slot_is_reserved_before_searching_cap_one_three_parallel(monkeypatch):
+    import app.services.recipe_photo as rp
+    monkeypatch.setattr(settings, "VISION_DAILY_CAP", 1, raising=False)
+    client = _FakeClient(default=[_photo(alt="eggs with tomato")], vision=[_vision()])
+    recipes = [_recipe(dish=f"dish {i}") for i in range(3)]
+    reasons = []
+    stats = asyncio.run(attach_photos(recipes, http_client=client, reasons=reasons))
+    assert len(client.searches) == 1 and stats["searches"] == 1 and stats["vision_calls"] == 1
+    assert sorted(reasons) == ["aprobada", "sin_cupo", "sin_cupo"] and rp._vision_state["count"] == 1
+
+
+def test_vision_slot_is_returned_when_no_candidate_reaches_vision():
+    client = _FakeClient(default=[_photo(alt="a bowl of pasta")], vision=[])
+    stats = _run([_recipe()], client)
+    assert stats["vision_calls"] == 0 and recipe_photo._vision_state["count"] == 0
+    client_err = _FakeClient(default=[_photo()], vision=[], search_status=500)
+    _run([_recipe(dish="other")], client_err)
+    assert recipe_photo._vision_state["count"] == 0
+
+
+@pytest.mark.parametrize("flags", [("yes", True), (True, "yes"), (1, True), (None, True)])
+def test_vision_non_bool_fields_are_parse_error_not_vision_no(flags):
+    payload = json.dumps({"is_food_dish": flags[0], "matches": flags[1]})
+    client = _FakeClient(default=[_photo()], vision=[_vision_raw(payload)])
+    reasons = []
+    stats = asyncio.run(attach_photos([_recipe()], http_client=client, reasons=reasons))
+    assert reasons == ["vision_fallo"] and stats["vision_failed"] == 1
+    assert len(recipe_photo._NEGATIVE_CACHE) == 0
+
+
+@pytest.mark.parametrize("status,expected", [(401, "unsplash_bloqueado"), (429, "unsplash_bloqueado"), (500, "unsplash_error")])
+def test_unsplash_reason_blocked_vs_error(status, expected):
+    client = _FakeClient(default=[_photo()], vision=[], search_status=status)
+    reasons = []
+    asyncio.run(attach_photos([_recipe()], http_client=client, reasons=reasons))
+    assert reasons == [expected]
+
+
+def test_unsplash_network_exception_and_bad_json_are_unsplash_error():
+    class _Boom(_FakeClient):
+        async def get(self, *a, **k):
+            raise RuntimeError("red")
+
+    reasons = []
+    asyncio.run(attach_photos([_recipe()], http_client=_Boom(vision=[]), reasons=reasons))
+    assert reasons == ["unsplash_error"]
+
+
+def test_attach_photos_never_raises_with_none_entries_or_bad_input():
+    client = _FakeClient(default=[_photo()], vision=[_vision()])
+    good = _recipe()
+    reasons = []
+    stats = asyncio.run(attach_photos([None, good], http_client=client, reasons=reasons))
+    assert good.imageUri is not None and reasons == ["error", "aprobada"] and stats["no_photo"] == 1
+    assert asyncio.run(attach_photos(None, http_client=client))["no_photo"] == 0
+    assert isinstance(asyncio.run(attach_photos(42, http_client=client)), dict)
+
+
+def test_time_cut_after_photo_applied_keeps_reason_aprobada(monkeypatch):
+    monkeypatch.setattr(settings, "PHOTO_TIME_BUDGET_SECONDS", 0.3, raising=False)
+
+    class _SlowPing(_FakeClient):
+        async def get(self, url, headers=None, params=None, timeout=None):
+            if url != SEARCH_URL:
+                await asyncio.sleep(2)
+            return await super().get(url, headers=headers, params=params, timeout=timeout)
+
+    client = _SlowPing(default=[_photo()], vision=[_vision()])
+    r = _recipe()
+    reasons = []
+    asyncio.run(attach_photos([r], http_client=client, reasons=reasons))
+    assert r.imageUri is not None and reasons == ["aprobada"]

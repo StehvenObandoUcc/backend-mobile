@@ -210,7 +210,8 @@ async def generate_recipes(
     recipes = await AIRecipeService.generate_recipes(req, http_client=http_client, language=language)
 
     # Foto real verificada (Unsplash). Nunca hace fallar la entrega mientras PHOTO_REQUIRED sea falso.
-    stats = await attach_photos(recipes, http_client=http_client)
+    used_photo_ids: set = set()  # misma foto nunca dos veces en una respuesta (ronda extra incluida)
+    stats = await attach_photos(recipes, http_client=http_client, used_ids=used_photo_ids)
     logger.info(f"[Recipes] Fotos: {stats}")
 
     if settings.PHOTO_REQUIRED:
@@ -225,7 +226,7 @@ async def generate_recipes(
                 extra = await AIRecipeService.generate_recipes(
                     extra_req, http_client=http_client, language=language, exclude_titles=seen_titles
                 )
-                extra_stats = await attach_photos(extra, http_client=http_client)
+                extra_stats = await attach_photos(extra, http_client=http_client, used_ids=used_photo_ids)
                 logger.info(f"[Recipes] Fotos (ronda extra): {extra_stats}")
                 recipes.extend(r for r in extra if r.imageUri)
             except Exception as exc:  # noqa: BLE001

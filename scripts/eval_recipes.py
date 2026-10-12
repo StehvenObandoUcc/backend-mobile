@@ -70,7 +70,7 @@ async def main(n: int, photos: bool = False):
         photos = False
 
     stats = {"first_attempt_rejects": 0, "verifier_calls": 0, "repairs": 0}
-    photo_stats = {"searches": 0, "cache_hits": 0, "vision_calls": 0, "approved_vision": 0, "approved_text": 0, "no_photo": 0}
+    photo_stats = {"searches": 0, "cache_hits": 0, "vision_calls": 0, "approved_vision": 0, "vision_failed": 0, "no_photo": 0}
     photo_details = []
     original = ai_recipe_service.verify_recipe
 
@@ -101,15 +101,17 @@ async def main(n: int, photos: bool = False):
             row["ok"], row["recipes"] = True, len(recipes)
             total_recipes += len(recipes)
             if photos:
-                for k, v in (await attach_photos(recipes)).items():
+                reasons: list = []
+                for k, v in (await attach_photos(recipes, reasons=reasons)).items():
                     photo_stats[k] += v
-                for r in recipes:
+                for r, reason in zip(recipes, reasons):
                     photo_details.append({
                         "scenario": name,
                         "title": r.title,
                         "dishNameEn": r.dishNameEn,
                         "mainIngredientsEn": r.mainIngredientsEn,
                         "imageUri": r.imageUri,
+                        "motivo": reason,
                         "altText": alt_text_for(r.imageUri) if r.imageUri else None,
                     })
             ids = {p["id"] for p in pantry}
@@ -150,13 +152,15 @@ async def main(n: int, photos: bool = False):
             "recetas_con_foto": with_photo,
             "pct_con_foto": round(100 * with_photo / total_recipes, 1) if total_recipes else 0,
             "aprobadas_por_vision": photo_stats["approved_vision"],
-            "aprobadas_solo_texto": photo_stats["approved_text"],
+            "fallos_vision": photo_stats["vision_failed"],
             "llamadas_vision": photo_stats["vision_calls"],
             "busquedas_unsplash": photo_stats["searches"],
         })
     summary["detalle"] = rows
     if photos:
-        summary["detalle_fotos"] = photo_details  # para revisar a mano si alguna foto es equivocada
+        # motivo: aprobada / vision_no / vision_fallo / sin_candidatas / sin_cupo / unsplash_bloqueado / repetida /
+        # tiempo_agotado / sin_protagonistas (o error). Para revisar a mano si alguna foto es equivocada.
+        summary["detalle_fotos"] = photo_details
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_recipes_result.json")
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(summary, fh, ensure_ascii=False, indent=2)
