@@ -34,7 +34,9 @@ from urllib.parse import urlparse
 import httpx
 
 from app.core.config import settings
+from app.core.db import get_dish_photo, save_dish_photo
 from app.core.rate_limit import consume_user_quota, refund_user_quota
+from app.services import ai_usage
 from app.schemas.recipe import RecipeResponse
 
 logger = logging.getLogger(__name__)
@@ -49,6 +51,8 @@ CACHE_MAX_ENTRIES = 500
 RESULTS_PER_QUERY = 5
 VISION_MAX_TOKENS = 2048
 VISION_LOG_CONTENT_CHARS = 120
+# Versión de la rúbrica de visión: súbela al cambiarla; las fotos guardadas con otra versión se ignoran.
+PHOTO_RULES_VERSION = 2
 
 # Términos que, si la foto los menciona y no son protagonistas ni parte del plato, delatan un plato equivocado:
 # proteínas, huevo y tipos de plato distintos
@@ -152,6 +156,12 @@ def _cache_put(cache: "OrderedDict", key: Tuple, value: Any) -> None:
     cache.move_to_end(key)
     while len(cache) > CACHE_MAX_ENTRIES:
         cache.popitem(last=False)
+
+
+def _dish_key(dish: Any) -> str:
+    """Clave de la caché persistente: dishNameEn en minúsculas, sin tildes, puntuación ni espacios dobles ('' si no hay)."""
+    text = re.sub(r"[^a-z0-9]+", " ", _normalize(dish))
+    return re.sub(r"\s+", " ", text).strip()[:100].strip()
 
 
 def _positive_get(key: Tuple) -> Optional[Dict[str, Any]]:
@@ -347,10 +357,31 @@ def _parse_vision_content(raw: str) -> Dict[str, Any]:
 
 
 _VISION_BOOL_FIELDS = ("is_food_dish", "same_dish_type", "main_visible")
+VISION_REASON_MAX_CHARS = 120
 
 
-async def _vision_approves(client: httpx.AsyncClient, photo: Dict[str, Any], dish: str, mains: List[str]) -> bool:
-    """Una llamada a DeepSeek con la miniatura. Lanza excepción si falla (red/formato)."""
+def _short_reason(value: Any) -> str:
+    """Motivo del modelo en una sola línea y recortado a 120 caracteres (vacío si no es texto)."""
+    if not isinstance(value, str):
+        return ""
+    return re.sub(r"\s+", " ", value).strip()[:VISION_REASON_MAX_CHARS].strip()
+
+
+async def _vision_approves(
+    client: httpx.AsyncClient, photo: Dict[str, Any], dish: str, mains: List[str]
+) -> Tuple[bool, str]:
+    """Una llamada a DeepSeek con la miniatura. Devuelve (aprobada, motivo del modelo). Lanza excepción si falla (red/formato).
+
+    Aprobada = los tres criterios de siempre Y `named_ingredient_visible` (el ingrediente que da nombre al plato, el
+    primero de `mains`, se ve en la foto). Si el campo falta o no es booleano, no se aprueba (conservador).
+    """
+    named = mains[0] if mains else ""
+    named_rule = (
+        f'4) named_ingredient_visible: ¿se VE en la foto el ingrediente que da nombre al plato, "{named}"? '
+        "Debe distinguirse a simple vista; no basta con que sea plausible, esté tapado o mezclado sin verse. "
+        "En caso de duda, false.\n"
+        if named else ""
+    )
     prompt = (
         f'Plato esperado: "{dish}". Ingredientes protagonistas: {", ".join(mains)}.\n'
         "Mira la foto y evalúa con criterio estricto:\n"
@@ -360,8 +391,10 @@ async def _vision_approves(client: httpx.AsyncClient, photo: Dict[str, Any], dis
         "una ensalada NO es un plato caliente; una pasta NO es arroz; unas albóndigas NO son trozos ni filetes. "
         "En caso de duda, false.\n"
         "3) main_visible: ¿el protagonista principal (el primero de la lista) es visible o claramente plausible?\n"
-        'Devuelve EXCLUSIVAMENTE un objeto JSON: {"is_food_dish": true, "same_dish_type": true, '
-        '"main_visible": true, "dish_type_seen": "tipo de plato visto, corto", "reason": "motivo breve"}'
+        + named_rule
+        + 'Devuelve EXCLUSIVAMENTE un objeto JSON estricto: {"is_food_dish": true, "same_dish_type": true, '
+        + '"main_visible": true, ' + ('"named_ingredient_visible": true, ' if named else "")
+        + '"dish_type_seen": "tipo de plato visto, corto", "reason": "motivo breve"}'
     )
     payload = {
         "model": settings.DEEPSEEK_MODEL,
@@ -388,12 +421,15 @@ async def _vision_approves(client: httpx.AsyncClient, photo: Dict[str, Any], dis
     finish_reason: Any = None
     content = ""
     try:
-        choice = resp.json()["choices"][0]
+        body = resp.json()
+        ai_usage.record("vision", body)
+        choice = body["choices"][0]
         finish_reason = choice.get("finish_reason")
         content = choice["message"].get("content") or ""
         parsed = _parse_vision_content(content)
         if not all(isinstance(parsed.get(k), bool) for k in _VISION_BOOL_FIELDS):
             raise ValueError("Respuesta de visión sin los campos booleanos esperados")
+        reason = _short_reason(parsed.get("reason"))
     except Exception as exc:  # noqa: BLE001
         # Diagnóstico: solo tipo de error, finish_reason y el inicio del contenido (nunca cabeceras ni claves)
         logger.warning(
@@ -401,7 +437,12 @@ async def _vision_approves(client: httpx.AsyncClient, photo: Dict[str, Any], dis
             f"contenido={str(content)[:VISION_LOG_CONTENT_CHARS]!r}"
         )
         raise _VisionParseError(type(exc).__name__) from exc
-    return all(parsed[k] is True for k in _VISION_BOOL_FIELDS)
+    approved = all(parsed[k] is True for k in _VISION_BOOL_FIELDS)
+    if named:
+        approved = approved and parsed.get("named_ingredient_visible") is True  # falta o no es booleano: no aprobada
+        if approved is False and parsed.get("named_ingredient_visible") is not True and not reason:
+            reason = f"no se ve «{named}» en la foto"
+    return approved, reason
 
 
 def _build_photo_data(photo: Dict[str, Any]) -> Dict[str, Any]:
@@ -428,6 +469,24 @@ def _build_photo_data(photo: Dict[str, Any]) -> Dict[str, Any]:
         # Para avisar la descarga cada vez que la foto se asigne (también desde la caché)
         "downloadLocation": download if isinstance(download, str) else None,
     }
+
+
+async def _stored_photo(dish_key: str) -> Optional[Dict[str, Any]]:
+    """Lectura de la caché persistente sin bloquear el bucle de eventos; ante cualquier error, None."""
+    try:
+        return await asyncio.to_thread(get_dish_photo, dish_key, PHOTO_RULES_VERSION)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _store_photo(dish_key: str, data: Dict[str, Any]) -> None:
+    """Guarda una aprobación nueva en la caché persistente. Nunca lanza: si la base falla, se sigue sin guardar."""
+    try:
+        await asyncio.to_thread(
+            save_dish_photo, dish_key, data["imageUri"], data["credit"], data.get("downloadLocation"), PHOTO_RULES_VERSION
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 async def _ping_download(client: httpx.AsyncClient, location: Any) -> None:
@@ -475,8 +534,10 @@ async def _pick_candidate(
         # Primera candidata no usada en el lote; se reserva sin await entre comprobar y reservar
         for photo, _score in ranked:
             pid = _photo_id(photo)
-            if pid not in used:
+            regular = photo["urls"]["regular"]
+            if pid not in used and regular not in used:
                 used.add(pid)
+                used.add(regular)  # también la URL: un acierto de la tabla (dish_photos) la reconoce por ella
                 return photo, ""
     if saw_candidates:
         return None, "repetida"  # todas las candidatas ya están en uso en este lote: no se cachea
@@ -506,13 +567,35 @@ async def _process_recipe(
     cached = _positive_get(key)
     if cached is not None:
         stats["cache_hits"] += 1
-        if cached.get("photoId") in used:
+        if cached.get("photoId") in used or cached.get("imageUri") in used:
             return "repetida"
         used.add(cached.get("photoId"))
+        used.add(cached.get("imageUri"))
         _apply(recipe, cached)
         reasons[index] = "aprobada"
         await _ping_download(client, cached.get("downloadLocation"))  # la foto se usa de nuevo: se avisa la descarga
         return "aprobada"
+
+    # Caché persistente (tabla dish_photos): un acierto no gasta Unsplash, visión ni cupo por usuario.
+    dish_key = _dish_key(dish)
+    if dish_key:
+        stored = await _stored_photo(dish_key)
+        if stored is not None:
+            uri = stored["imageUri"]
+            if uri not in used:
+                stats["db_cache_hits"] += 1
+                used.add(uri)
+                data = {
+                    "photoId": uri, "imageUri": uri, "alt": "", "credit": stored["imageCredit"],
+                    "downloadLocation": stored["downloadLocation"],
+                }
+                _cache_put(_POSITIVE_CACHE, key, (time.time(), data))
+                _apply(recipe, data)
+                reasons[index] = "aprobada"
+                await _ping_download(client, data["downloadLocation"])
+                return "aprobada"
+            # La foto ya se usó en esta tanda: sigue al flujo normal (busca otra)
+
     negative = _negative_get(key)
     if negative is not None:
         stats["cache_hits"] += 1
@@ -542,7 +625,7 @@ async def _process_recipe(
 
     stats["vision_calls"] += 1
     try:
-        approved = await _vision_approves(client, chosen, dish or fallback_query, mains)
+        approved, vision_reason = await _vision_approves(client, chosen, dish or fallback_query, mains)
     except Exception as exc:  # noqa: BLE001
         stats["vision_failed"] += 1
         if not isinstance(exc, _VisionParseError):  # los errores de formato ya se registraron con detalle
@@ -550,8 +633,9 @@ async def _process_recipe(
         return "vision_fallo"  # no se cachea: podrá verificarse más tarde
 
     if not approved:
-        _cache_put(_NEGATIVE_CACHE, key, (time.time(), "vision_no"))
-        return "vision_no"
+        motivo = f"vision_no: {vision_reason}" if vision_reason else "vision_no"
+        _cache_put(_NEGATIVE_CACHE, key, (time.time(), motivo))  # la caché negativa conserva el motivo de visión
+        return motivo
 
     data = _build_photo_data(chosen)
     _cache_put(_POSITIVE_CACHE, key, (time.time(), data))
@@ -559,6 +643,8 @@ async def _process_recipe(
     _apply(recipe, data)
     reasons[index] = "aprobada"
     await _ping_download(client, data.get("downloadLocation"))
+    if dish_key:
+        await _store_photo(dish_key, data)  # solo aprobaciones nuevas; los rechazos no se guardan
     return "aprobada"
 
 
@@ -583,14 +669,17 @@ async def attach_photos(
     """Busca y verifica con visión una foto real para cada receta, modificándolas en el sitio.
 
     Nunca lanza excepciones hacia afuera: ante cualquier problema las recetas quedan sin foto.
-    Devuelve estadísticas {searches, cache_hits, vision_calls, approved_vision, vision_failed, no_photo}.
+    Devuelve estadísticas {searches, cache_hits, db_cache_hits (tabla dish_photos), vision_calls, approved_vision, vision_failed, no_photo}.
     Si se pasa `reasons` (lista), se rellena con el motivo de cada receta, en el mismo orden.
     Si se pasa `used_ids`, ese conjunto de ids de foto se usa y se actualiza (para no repetir fotos entre
     varias llamadas de una misma respuesta).
     Si se pasa `user_id`, rigen además las cuotas por usuario (búsquedas de Unsplash por hora, visión por día);
     sin él no hay tope por usuario (scripts de evaluación).
     """
-    stats = {"searches": 0, "cache_hits": 0, "vision_calls": 0, "approved_vision": 0, "vision_failed": 0, "no_photo": 0}
+    stats = {
+        "searches": 0, "cache_hits": 0, "db_cache_hits": 0, "vision_calls": 0, "approved_vision": 0,
+        "vision_failed": 0, "no_photo": 0,
+    }
     local_reasons: List[str] = []
     try:
         items = list(recipes or [])
