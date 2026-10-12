@@ -2,6 +2,9 @@ import logging
 from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.db import init_db
@@ -16,6 +19,20 @@ async def lifespan(app: FastAPI):
     if settings.is_production() and not settings.is_production_secure():
         raise RuntimeError(
             "JWT_SECRET inseguro en producción: defina un secreto aleatorio de al menos 32 caracteres."
+        )
+
+    if settings.AUTH_PROVIDER_INVALID and settings.is_production():
+        raise RuntimeError("AUTH_PROVIDER inválido en producción: use 'local' o 'supabase'.")
+
+    # AUTH_PROVIDER=supabase necesita URL y clave de Supabase: sin ellas nadie podría iniciar sesión
+    if settings.AUTH_PROVIDER == "supabase" and not (settings.SUPABASE_URL and settings.SUPABASE_KEY):
+        if settings.is_production():
+            raise RuntimeError(
+                "AUTH_PROVIDER=supabase requiere SUPABASE_URL y SUPABASE_KEY en producción."
+            )
+        logger.warning(
+            "[DESPLIEGUE] AUTH_PROVIDER=supabase pero faltan SUPABASE_URL o SUPABASE_KEY: "
+            "los flujos de autenticación responderán 503."
         )
 
     # Inicialización controlada de base de datos en el ciclo de vida de la aplicación
@@ -61,6 +78,13 @@ else:
     cors_kwargs["allow_credentials"] = True
 
 app.add_middleware(CORSMiddleware, **cors_kwargs)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(request, exc: RequestValidationError):
+    """Mismo formato 422 de FastAPI pero sin el campo `input`, para no devolver contraseñas ni códigos."""
+    errors = [{key: value for key, value in err.items() if key != "input"} for err in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
 
 
 @app.middleware("http")

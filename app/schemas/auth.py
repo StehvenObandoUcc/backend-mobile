@@ -1,8 +1,24 @@
 import re
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field, field_validator
 
 EMAIL_REGEX = re.compile(r'^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$')
+CODE_REGEX = re.compile(r'^[0-9]{6}$')
+
+
+def _normalize_email(v: str) -> str:
+    v = v.strip().lower()
+    if not EMAIL_REGEX.match(v):
+        raise ValueError("Formato de correo electrónico inválido.")
+    return v
+
+
+def _normalize_code(v: str) -> str:
+    v = v.strip()
+    if not CODE_REGEX.match(v):
+        raise ValueError("El código debe tener exactamente 6 dígitos.")
+    return v
+
 
 class RegisterRequest(BaseModel):
     email: str = Field(min_length=3, max_length=100, description="Correo electrónico del usuario")
@@ -41,6 +57,53 @@ class LoginRequest(BaseModel):
             raise ValueError("Formato de correo electrónico inválido.")
         return v
 
+class VerifyEmailRequest(BaseModel):
+    """Verificación del correo con el código de 6 dígitos enviado por Supabase Auth."""
+    email: str = Field(min_length=3, max_length=100, description="Correo electrónico")
+    code: str = Field(min_length=6, max_length=12, description="Código de 6 dígitos")
+    password: str = Field(min_length=8, max_length=128, description="Contraseña elegida por quien verifica el correo")
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        return _normalize_email(v)
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, v: str) -> str:
+        return _normalize_code(v)
+
+class ResendCodeRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=100, description="Correo electrónico")
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        return _normalize_email(v)
+
+class ForgotPasswordRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=100, description="Correo electrónico")
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        return _normalize_email(v)
+
+class ResetPasswordRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=100, description="Correo electrónico")
+    code: str = Field(min_length=6, max_length=12, description="Código de 6 dígitos recibido por correo")
+    new_password: str = Field(min_length=8, max_length=128, description="Nueva contraseña")
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        return _normalize_email(v)
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, v: str) -> str:
+        return _normalize_code(v)
+
 class DeleteAccountRequest(BaseModel):
     """Confirmación para eliminar la cuenta: se pide la contraseña actual."""
     password: str = Field(min_length=1, max_length=128, description="Contraseña actual del usuario")
@@ -55,3 +118,11 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     expires_at: str
     user: UserResponse
+
+class VerificationRequiredResponse(BaseModel):
+    """Registro creado: falta verificar el correo con el código enviado."""
+    status: Literal["verification_required"] = "verification_required"
+    email: str
+
+class MessageResponse(BaseModel):
+    message: str

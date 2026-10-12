@@ -74,12 +74,23 @@ def init_db():
                 email TEXT UNIQUE NOT NULL,
                 name TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
+                auth_id TEXT,
+                email_verified INTEGER NOT NULL DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """
         )
+        # Bases locales creadas antes de Supabase Auth: añade solo las columnas que falten
+        user_cols = {row[1] for row in conn.execute("PRAGMA table_info(users);").fetchall()}
+        if "auth_id" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN auth_id TEXT;")
+        if "email_verified" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0;")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_auth_id ON users(auth_id) WHERE auth_id IS NOT NULL;"
+        )
 
         conn.execute(
             """
@@ -161,8 +172,8 @@ def init_db():
             demo_hash = hash_password("123456")
             conn.execute(
                 """
-                INSERT INTO users (id, email, name, password_hash)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO users (id, email, name, password_hash, email_verified)
+                VALUES (?, ?, ?, ?, 1)
                 """,
                 ("usr-demo-1", "demo@foodai.com", "Chef Demo", demo_hash),
             )
@@ -170,6 +181,17 @@ def init_db():
 
 
 # ─── Operaciones de Usuario (Supabase con fallback SQLite) ─────────────────────
+
+_USER_COLUMNS = "id, email, name, password_hash, auth_id, email_verified, created_at, updated_at"
+
+
+def _normalize_user(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Unifica el diccionario de usuario: auth_id (str o None) y email_verified (bool)."""
+    user = dict(data)
+    user["auth_id"] = user.get("auth_id") or None
+    user["email_verified"] = bool(user.get("email_verified"))
+    return user
+
 
 def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
     """Busca un usuario por su email."""
@@ -179,7 +201,7 @@ def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
         try:
             res = sb.table("users").select("*").eq("email", clean_email).execute()
             if res.data and len(res.data) > 0:
-                return res.data[0]
+                return _normalize_user(res.data[0])
             return None
         except Exception as err:
             _db_unavailable(err, "Error consultando usuario en Supabase")
@@ -187,11 +209,11 @@ def get_user_by_email(email: str) -> Optional[Dict[str, Any]]:
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, email, name, password_hash, created_at, updated_at FROM users WHERE email = ?",
+            f"SELECT {_USER_COLUMNS} FROM users WHERE email = ?",
             (clean_email,),
         )
         row = cursor.fetchone()
-        return dict(row) if row else None
+        return _normalize_user(dict(row)) if row else None
 
 
 def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
@@ -201,7 +223,7 @@ def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
         try:
             res = sb.table("users").select("*").eq("id", user_id).execute()
             if res.data and len(res.data) > 0:
-                return res.data[0]
+                return _normalize_user(res.data[0])
             return None
         except Exception as err:
             _db_unavailable(err, "Error consultando usuario por ID en Supabase")
@@ -209,15 +231,77 @@ def get_user_by_id(user_id: str) -> Optional[Dict[str, Any]]:
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, email, name, password_hash, created_at, updated_at FROM users WHERE id = ?",
+            f"SELECT {_USER_COLUMNS} FROM users WHERE id = ?",
             (user_id,),
         )
         row = cursor.fetchone()
-        return dict(row) if row else None
+        return _normalize_user(dict(row)) if row else None
 
 
-def create_user(user_id: str, email: str, name: str, password_hash: str) -> Dict[str, Any]:
-    """Crea e inserta un nuevo usuario."""
+def get_user_by_auth_id(auth_id: str) -> Optional[Dict[str, Any]]:
+    """Busca un usuario por su id en Supabase Auth."""
+    if not auth_id:
+        return None
+    sb = get_supabase()
+    if sb:
+        try:
+            res = sb.table("users").select("*").eq("auth_id", auth_id).execute()
+            if res.data and len(res.data) > 0:
+                return _normalize_user(res.data[0])
+            return None
+        except Exception as err:
+            _db_unavailable(err, "Error consultando usuario por auth_id en Supabase")
+
+    with get_connection() as conn:
+        row = conn.execute(f"SELECT {_USER_COLUMNS} FROM users WHERE auth_id = ?", (auth_id,)).fetchone()
+        return _normalize_user(dict(row)) if row else None
+
+
+def _update_user_fields(user_id: str, fields: Dict[str, Any], context: str) -> None:
+    """Actualiza columnas de un usuario (solo claves internas y fijas, nunca entrada del cliente)."""
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    sb = get_supabase()
+    if sb:
+        try:
+            sb.table("users").update({**fields, "updated_at": now_iso}).eq("id", user_id).execute()
+            return
+        except Exception as err:
+            _db_unavailable(err, context)
+
+    assignments = ", ".join(f"{column} = ?" for column in fields)
+    with get_connection() as conn:
+        conn.execute(
+            f"UPDATE users SET {assignments}, updated_at = ? WHERE id = ?",
+            (*fields.values(), now_iso, user_id),
+        )
+        conn.commit()
+
+
+def set_user_auth_link(user_id: str, auth_id: str) -> None:
+    """Enlaza al usuario con su cuenta de Supabase Auth."""
+    _update_user_fields(user_id, {"auth_id": auth_id}, "Error enlazando auth_id en Supabase")
+
+
+def set_user_password_hash(user_id: str, password_hash: str) -> None:
+    """Reemplaza el hash de contraseña (p. ej. por el marcador "!supabase" al pasar a Supabase Auth)."""
+    _update_user_fields(user_id, {"password_hash": password_hash}, "Error actualizando la contraseña en Supabase")
+
+
+def set_user_email_verified(user_id: str, verified: bool) -> None:
+    """Marca (o desmarca) el correo del usuario como verificado."""
+    value: Any = bool(verified) if get_supabase() else int(bool(verified))
+    _update_user_fields(user_id, {"email_verified": value}, "Error actualizando email_verified en Supabase")
+
+
+def create_user(
+    user_id: str,
+    email: str,
+    name: str,
+    password_hash: str,
+    auth_id: Optional[str] = None,
+    email_verified: bool = True,
+) -> Dict[str, Any]:
+    """Crea e inserta un nuevo usuario. Por defecto el correo cuenta como verificado (modo local)."""
     clean_email = email.strip().lower()
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
     sb = get_supabase()
@@ -231,10 +315,15 @@ def create_user(user_id: str, email: str, name: str, password_hash: str) -> Dict
                 "created_at": now_iso,
                 "updated_at": now_iso,
             }
+            # Las columnas nuevas solo se envían cuando hacen falta, para no romper el modo local
+            # en una base de Supabase donde aún no se corrió migrations/03_supabase_auth.sql
+            if auth_id is not None or not email_verified or settings.AUTH_PROVIDER == "supabase":
+                user_data["auth_id"] = auth_id
+                user_data["email_verified"] = bool(email_verified)
             res = sb.table("users").insert(user_data).execute()
             if res.data and len(res.data) > 0:
-                return res.data[0]
-            return user_data
+                return _normalize_user(res.data[0])
+            return _normalize_user(user_data)
         except Exception as err:
             logger.error(f"[DB] Error insertando usuario en Supabase: {err}")
             raise
@@ -242,10 +331,10 @@ def create_user(user_id: str, email: str, name: str, password_hash: str) -> Dict
     with get_connection() as conn:
         conn.execute(
             """
-            INSERT INTO users (id, email, name, password_hash, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO users (id, email, name, password_hash, auth_id, email_verified, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (user_id, clean_email, name, password_hash, now_iso, now_iso),
+            (user_id, clean_email, name, password_hash, auth_id, int(bool(email_verified)), now_iso, now_iso),
         )
         conn.commit()
     return {
@@ -253,6 +342,8 @@ def create_user(user_id: str, email: str, name: str, password_hash: str) -> Dict
         "email": clean_email,
         "name": name,
         "password_hash": password_hash,
+        "auth_id": auth_id,
+        "email_verified": bool(email_verified),
         "created_at": now_iso,
         "updated_at": now_iso,
     }

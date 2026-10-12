@@ -12,6 +12,7 @@ import pytest
 from app.core.db import reset_db, init_db
 from app.core.rate_limit import reset_rate_limits
 from app.core.security import create_jwt_token
+from app.services.auth_service import reset_auth_cooldowns
 
 
 @pytest.fixture(autouse=True)
@@ -20,8 +21,10 @@ def clean_db_for_tests():
     init_db()
     reset_db()
     reset_rate_limits()
+    reset_auth_cooldowns()
     yield
     reset_rate_limits()
+    reset_auth_cooldowns()
 
 
 @pytest.fixture

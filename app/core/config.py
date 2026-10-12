@@ -1,5 +1,8 @@
 from typing import List
+import logging
 import os
+
+_config_logger = logging.getLogger(__name__)
 
 def _load_env():
     backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
@@ -14,6 +17,32 @@ def _load_env():
                     os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 
 _load_env()
+
+
+def _auth_provider_is_invalid() -> bool:
+    value = os.getenv("AUTH_PROVIDER", "local").strip().lower() or "local"
+    return value not in ("local", "supabase")
+
+
+def _resolve_auth_provider() -> str:
+    """AUTH_PROVIDER válido: "local" (por defecto) o "supabase". Cualquier otro valor cae en "local"."""
+    value = os.getenv("AUTH_PROVIDER", "local").strip().lower() or "local"
+    if value not in ("local", "supabase"):
+        _config_logger.warning("AUTH_PROVIDER inválido (%r): se usará 'local'.", value)
+        return "local"
+    return value
+
+
+def _float_env(name: str, default: float) -> float:
+    """Lee un float del entorno; si el valor es inválido usa el predeterminado con un warning."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        _config_logger.warning("%s inválido (%r): se usará %s.", name, raw, default)
+        return default
 
 
 class Settings:
@@ -49,6 +78,14 @@ class Settings:
         _raw_supabase_url = _raw_supabase_url[:-8].rstrip("/")
     SUPABASE_URL: str = _raw_supabase_url
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "").strip()
+
+    # Proveedor de autenticación: "local" (PBKDF2 propio) o "supabase" (Supabase Auth como dueño de
+    # la contraseña y del correo verificado; el backend sigue emitiendo su propio JWT)
+    AUTH_PROVIDER: str = _resolve_auth_provider()
+    AUTH_PROVIDER_INVALID: bool = _auth_provider_is_invalid()  # en producción impide arrancar
+    SUPABASE_AUTH_TIMEOUT_SECONDS: float = _float_env("SUPABASE_AUTH_TIMEOUT_SECONDS", 10.0)
+    # Opcional: clave pública (anon) para las llamadas de usuario a Supabase Auth; /admin siempre usa SUPABASE_KEY
+    SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "").strip()
 
     # AI Config (DeepSeek)
     AI_PROVIDER: str = os.getenv("AI_PROVIDER", "deepseek")
