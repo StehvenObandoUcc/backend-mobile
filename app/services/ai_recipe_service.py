@@ -19,7 +19,9 @@ from app.schemas.recipe import (
 )
 
 from app.schemas.ingredient import ALLOWED_UNITS
-from app.services.recipe_verifier import MAX_PANTRY_PER_RECIPE, safe_id, verify_recipe, verify_steps
+from app.services import ai_usage
+from app.services.culinary_rules import check_culinary, has_compatible_pair, pair_excused
+from app.services.recipe_verifier import MAX_PANTRY_PER_RECIPE, has_term as _has_term, safe_id, verify_recipe, verify_steps
 
 UNIT_NORMALIZATION = {
     "tablespoon": ("milliliters", 15),
@@ -102,15 +104,6 @@ COMMERCIAL_BEVERAGES = ["malta", "pony malta", "gaseosa", "refresco", "soda", "c
 SAVORY_MAINS = ["pollo", "carne", "res", "pescado", "cerdo", "pavo", "marisco"]
 
 
-def _has_term(name: str, term: str) -> bool:
-    """¿`name` contiene `term` como palabra (o frase) completa, con plural simple?
-
-    Evita los falsos positivos por subcadena: «res» ya no coincide con «fresa», «fresco», «refresco» ni «tres»,
-    ni «ajo» con «ajonjolí». `name` y `term` vienen normalizados (minúsculas, sin tildes).
-    """
-    return re.search(r"(?<![a-z0-9])" + re.escape(term) + r"(?:s|es)?(?![a-z0-9])", name) is not None
-
-
 def validate_recipe_sanity(recipe: RecipeResponse) -> Tuple[bool, Optional[str]]:
     """Valida que la receta cumpla criterios mínimos de estructura y coherencia gastronómica."""
     title = recipe.title.strip()
@@ -128,6 +121,8 @@ def validate_recipe_sanity(recipe: RecipeResponse) -> Tuple[bool, Optional[str]]
 
     for pair in INCOMPATIBLE_PAIRS:
         if all(any(_has_term(name, term) for name in norm_names) for term in pair):
+            if len(pair) == 2 and pair_excused(recipe.title, recipe.dishNameEn, *sorted(pair)):
+                continue  # plato tradicional (mole): misma lista de excepciones que check_culinary
             return False, f"Combinación incompatible detectada en ingredientes: {pair}"
 
     # Verificación estricta: ninguna bebida comercial debe cocinarse con carnes o pescados salados
@@ -300,6 +295,10 @@ class AIRecipeService:
                 f"para que la preparación sea completa, balanceada y de alta calidad culinaria."
             )
 
+        # Con una despensa donde nada combina (gelatina + sardinas + café) basta UN ingrediente como protagonista
+        pantry_items = [i for i in req.ingredients[:MAX_PANTRY_INGREDIENTS] if i.get("name")]
+        min_used = 1 if pantry_items and not has_compatible_pair(pantry_items) else 2
+
         base_prompt = f"""
 Actúa como chef profesional y nutricionista. Genera EXACTAMENTE {count} recetas DIFERENTES basadas en los ingredientes del usuario.
 
@@ -324,8 +323,10 @@ Criterios de Plausibilidad y Armonía Culinaria:
 6. Coherencia con Ingrediente Único: Si solo hay 1 ingrediente seleccionado, constrúyelo como la estrella del plato y complementa con básicos en missingIngredients.
 7. Variedad entre las recetas, pero cada una clásica: usa técnicas distintas (salteado, horneado, guisado, ensalada tibia, sopa/crema) sin salirte de platos tradicionales.
 8. Plato reconocible: cada receta debe ser un plato casero conocido, con un nombre común que aparecería en un recetario (latinoamericano o internacional). PROHIBIDO inventar fusiones o combinaciones "creativas" para aprovechar ingredientes. Ante la duda, elige el plato clásico más simple.
-9. Cuántos ingredientes usar: cada receta usa entre 2 y {MAX_PANTRY_PER_RECIPE} ingredientes de la despensa (los que mejor combinen); NO intentes usar todos. Con una despensa variada, cada receta puede usar un subconjunto distinto; los ingredientes que no encajen se quedan fuera.
-10. Dulce o salado: cada receta es claramente dulce (postre, desayuno dulce, bebida) o claramente salada; no las mezcles salvo platos tradicionales que ya lo hacen (los ejemplos de la regla 2).
+9. Cuántos ingredientes usar: cada receta usa entre {min_used} y {MAX_PANTRY_PER_RECIPE} ingredientes de la despensa (los que mejor combinen); NO intentes usar todos. Con una despensa variada, cada receta puede usar un subconjunto distinto; los ingredientes que no encajen se quedan fuera. Si no hay dos ingredientes de la despensa que combinen en un plato clásico, usa UNO solo como protagonista (p. ej. sardinas → tostadas de sardinas) y completa con básicos; nunca fuerces una mezcla.
+10. Dulce o salado: cada receta es claramente dulce (postre, desayuno dulce, bebida) o claramente salada; no las mezcles salvo platos tradicionales que ya lo hacen (los ejemplos de la regla 2). Un solo perfil por receta: indícalo en "flavorProfile" ("sweet" o "savory").
+11. Nombre de recetario: el plato debe llamarse como en un recetario; si el nombre no existiría en uno, cambia de plato.
+12. Papel de cada ingrediente: cada ingrediente cumple un papel claro (base, proteína, sabor o textura); si no cumple ninguno, déjalo fuera.
 
 Restricciones:
 - Cantidad: EXACTAMENTE {count} receta(s).
@@ -355,6 +356,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
       "matchScore": 95,
       "dishNameEn": "tomato scrambled eggs",
       "mainIngredientsEn": ["egg", "tomato"],
+      "flavorProfile": "savory",
       "availableIngredients": [
         {{"id": "av-1", "inventoryIngredientId": "<id de la lista>", "name": "Nombre ingrediente", "quantity": 1, "unit": "units", "isAvailable": true, "isOptional": false, "substitutions": []}}
       ],
@@ -400,6 +402,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
                     response.raise_for_status()
 
             data = response.json()
+            ai_usage.record("recipes", data)
             raw_text = data["choices"][0]["message"].get("content") or ""
             if not raw_text.strip():
                 raise ValueError("DeepSeek devolvió contenido vacío")
@@ -438,6 +441,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
                     isPrepared=False,
                     dishNameEn=dish_en,
                     mainIngredientsEn=main_en,
+                    flavorProfile=item.get("flavorProfile"),
                 )
                 parsed_recipes.append(rec)
 
@@ -447,10 +451,15 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
                 if not is_valid:
                     raise ValueError(reason or "Fallo de coherencia gastronómica")
                 # Verificación contra la despensa real (ingredientes inventados, cantidades, evitar, uso mínimo)
-                is_verified, verify_reason = verify_recipe(r, req.ingredients, req.avoid_ingredients)
+                is_verified, verify_reason = verify_recipe(r, req.ingredients, req.avoid_ingredients, min_used=min_used)
                 if not is_verified:
                     logger.warning(f"[AIRecipeService] Receta descartada por la despensa: {verify_reason}")
                     raise ValueError(verify_reason or "La receta no coincide con la despensa")
+                # Reglas culinarias (R1–R4): igual que un rechazo del verificador, entra al reintento correctivo
+                is_culinary, culinary_rule, culinary_reason = check_culinary(r, req.ingredients)
+                if not is_culinary:
+                    logger.warning(f"[AIRecipeService] Receta descartada por regla culinaria {culinary_rule}: {culinary_reason}")
+                    raise ValueError(culinary_reason or "Combinación no culinaria")
 
             return parsed_recipes
 
@@ -627,6 +636,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "steps" conteniendo 
 
         try:
             data = response.json()
+            ai_usage.record("steps", data)
             raw_text = data["choices"][0]["message"].get("content") or ""
             parsed = json.loads(raw_text.strip())
             steps = parsed.get("steps", [])
