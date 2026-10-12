@@ -10,6 +10,13 @@ inválida) la receta queda sin foto.
 Nunca hay bucles: cada recurso tiene un tope fijo (máx. 2 búsquedas y 1 llamada de visión por receta, un
 presupuesto de tiempo por cada llamada a attach_photos y bloqueo de 10 minutos ante error/límite de Unsplash, sin reintentos).
 
+Cuotas por usuario (en memoria, además del bloqueo y el tope globales): UNSPLASH_PER_USER_HOURLY búsquedas por hora y
+VISION_PER_USER_DAILY llamadas de visión por día. Agotada la cuota, la petición de ese usuario sale sin foto
+(motivo «cupo_usuario») sin afectar a los demás. `attach_photos(user_id=None)` = sin tope por usuario (scripts).
+
+Guías de Unsplash: hotlink de `urls.*`, aviso a `download_location` cada vez que una foto se asigna a una receta
+(también si sale de la caché), y atribución al fotógrafo y a Unsplash con enlaces que llevan utm.
+
 NOTA: el contador de visión, las cachés y el bloqueo viven en memoria del proceso; si el dyno de Heroku
 reinicia (o hay varios dynos) se reinician. Es aceptable: solo significaría gastar un poco más de visión.
 """
@@ -27,6 +34,7 @@ from urllib.parse import urlparse
 import httpx
 
 from app.core.config import settings
+from app.core.rate_limit import consume_user_quota, refund_user_quota
 from app.schemas.recipe import RecipeResponse
 
 logger = logging.getLogger(__name__)
@@ -180,6 +188,15 @@ def _unsplash_headers() -> Dict[str, str]:
     return {"Authorization": f"Client-ID {settings.UNSPLASH_ACCESS_KEY}", "Accept-Version": "v1"}
 
 
+def _is_unsplash_url(url: Any, host: str = "unsplash.com") -> bool:
+    """https y host exacto (nunca un dominio parecido ni otro esquema)."""
+    try:
+        parsed = urlparse(str(url))
+        return parsed.scheme == "https" and parsed.hostname == host
+    except ValueError:
+        return False
+
+
 def _utm(url: str) -> str:
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}utm_source={settings.UNSPLASH_APP_NAME}&utm_medium=referral"
@@ -254,6 +271,8 @@ def _filter_candidates(results: List[Dict[str, Any]], mains: List[str], dish: st
         urls = photo.get("urls")
         if not isinstance(urls, dict) or not urls.get("regular") or not urls.get("small"):
             continue
+        if not _is_unsplash_url(urls.get("regular"), "images.unsplash.com"):
+            continue  # solo se muestran imágenes servidas por el CDN de Unsplash
         text = _photo_text(photo)
         score = sum(1 for m in mains if _mentions(text, _normalize(m)))
         if score == 0:
@@ -388,8 +407,14 @@ async def _vision_approves(client: httpx.AsyncClient, photo: Dict[str, Any], dis
 def _build_photo_data(photo: Dict[str, Any]) -> Dict[str, Any]:
     user = photo.get("user") if isinstance(photo.get("user"), dict) else {}
     links = user.get("links") if isinstance(user.get("links"), dict) else {}
+    photo_links = photo.get("links") if isinstance(photo.get("links"), dict) else {}
     profile = links.get("html")
-    source_url = _utm("https://unsplash.com/")
+    page = photo_links.get("html")
+    cover = _utm("https://unsplash.com/")
+    # Atribución: perfil del fotógrafo y página de LA FOTO (no la portada), ambos con utm; solo enlaces a unsplash.com
+    profile_url = _utm(profile) if _is_unsplash_url(profile) else cover
+    source_url = _utm(page) if _is_unsplash_url(page) else cover
+    download = photo_links.get("download_location")
     return {
         "photoId": _photo_id(photo),
         "imageUri": photo["urls"]["regular"],
@@ -397,23 +422,21 @@ def _build_photo_data(photo: Dict[str, Any]) -> Dict[str, Any]:
         "credit": {
             "source": "unsplash",
             "name": str(user.get("name") or "Unsplash"),
-            "profileUrl": _utm(profile) if isinstance(profile, str) and profile else source_url,
+            "profileUrl": profile_url,
             "sourceUrl": source_url,
         },
+        # Para avisar la descarga cada vez que la foto se asigne (también desde la caché)
+        "downloadLocation": download if isinstance(download, str) else None,
     }
 
 
-async def _ping_download(client: httpx.AsyncClient, photo: Dict[str, Any]) -> None:
-    """La guía de Unsplash pide avisar la descarga al usar una foto. Si falla, se ignora."""
-    location = (photo.get("links") or {}).get("download_location") if isinstance(photo.get("links"), dict) else None
+async def _ping_download(client: httpx.AsyncClient, location: Any) -> None:
+    """La guía de Unsplash pide avisar la descarga al usar una foto: una sola llamada por asignación, sin reintentos.
+    Si falla, se ignora."""
     if not location:
         return
     # La clave solo viaja a la API de Unsplash: https y host exacto (nunca a otro dominio)
-    try:
-        parsed = urlparse(str(location))
-        if parsed.scheme != "https" or parsed.hostname != "api.unsplash.com":
-            return
-    except ValueError:
+    if not _is_unsplash_url(location, "api.unsplash.com"):
         return
     try:
         await client.get(location, headers=_unsplash_headers(), timeout=DOWNLOAD_PING_TIMEOUT_SECONDS)
@@ -429,7 +452,7 @@ def _apply(recipe: RecipeResponse, data: Dict[str, Any]) -> None:
 # ── Flujo por receta ──
 async def _pick_candidate(
     client: httpx.AsyncClient, dish: str, fallback_query: str, mains: List[str], key: Tuple,
-    stats: Dict[str, int], used: set,
+    stats: Dict[str, int], used: set, user_id: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """Escalera de consultas y elección de candidata. Devuelve (foto reservada, motivo si no hay)."""
     # (a) nombre del plato; (b) 2 protagonistas + «dish». Máximo 2 búsquedas.
@@ -441,6 +464,8 @@ async def _pick_candidate(
     for query in queries[:2]:
         if _is_blocked():
             return None, "unsplash_bloqueado"  # no se cachea como «sin foto»: no fue un rechazo real
+        if consume_user_quota("unsplash", user_id or "", settings.UNSPLASH_PER_USER_HOURLY, 3600) is None:
+            return None, "cupo_usuario"  # tope por usuario: no se cachea, no afecta a otros
         results, failure = await _search(client, query)
         stats["searches"] += 1
         if results is None:
@@ -461,7 +486,7 @@ async def _pick_candidate(
 
 async def _process_recipe(
     recipe: RecipeResponse, client: httpx.AsyncClient, stats: Dict[str, int], used: set,
-    reasons: List[str], index: int,
+    reasons: List[str], index: int, user_id: Optional[str] = None,
 ) -> str:
     """Procesa una receta y devuelve el motivo del resultado (para diagnóstico en scripts/eval_recipes.py).
 
@@ -486,6 +511,7 @@ async def _process_recipe(
         used.add(cached.get("photoId"))
         _apply(recipe, cached)
         reasons[index] = "aprobada"
+        await _ping_download(client, cached.get("downloadLocation"))  # la foto se usa de nuevo: se avisa la descarga
         return "aprobada"
     negative = _negative_get(key)
     if negative is not None:
@@ -494,18 +520,25 @@ async def _process_recipe(
 
     # Sin verificación de visión no se asigna foto: el cupo se reserva ANTES de buscar para no gastar
     # búsquedas de Unsplash para nada (síncrono, sin await: seguro entre tareas paralelas)
-    if not settings.DEEPSEEK_API_KEY or not _reserve_vision_call():
+    if not settings.DEEPSEEK_API_KEY:
+        return "sin_cupo"
+    vision_token = consume_user_quota("vision", user_id or "", settings.VISION_PER_USER_DAILY, 24 * 60 * 60)
+    if vision_token is None:
+        return "cupo_usuario"
+    if not _reserve_vision_call():
+        refund_user_quota("vision", user_id or "", vision_token)
         return "sin_cupo"
 
     slot_used = False
     try:
-        chosen, reason = await _pick_candidate(client, dish, fallback_query, mains, key, stats, used)
+        chosen, reason = await _pick_candidate(client, dish, fallback_query, mains, key, stats, used, user_id)
         if chosen is None:
             return reason
         slot_used = True  # la unidad se queda gastada aunque la visión falle
     finally:
         if not slot_used:
             _release_vision_call()  # no hubo candidata que enviar a la visión: se devuelve la unidad
+            refund_user_quota("vision", user_id or "", vision_token)
 
     stats["vision_calls"] += 1
     try:
@@ -525,15 +558,16 @@ async def _process_recipe(
     stats["approved_vision"] += 1
     _apply(recipe, data)
     reasons[index] = "aprobada"
-    await _ping_download(client, chosen)
+    await _ping_download(client, data.get("downloadLocation"))
     return "aprobada"
 
 
 async def _safe_process(
-    recipe: RecipeResponse, client: httpx.AsyncClient, stats: Dict[str, int], used: set, reasons: List[str], index: int
+    recipe: RecipeResponse, client: httpx.AsyncClient, stats: Dict[str, int], used: set, reasons: List[str], index: int,
+    user_id: Optional[str] = None,
 ) -> None:
     try:
-        reasons[index] = await _process_recipe(recipe, client, stats, used, reasons, index)
+        reasons[index] = await _process_recipe(recipe, client, stats, used, reasons, index, user_id)
     except Exception as exc:  # noqa: BLE001
         reasons[index] = "error"
         logger.warning(f"[RecipePhoto] Error con la foto de una receta ({type(exc).__name__}: {str(exc)[:120]}); queda sin foto.")
@@ -544,6 +578,7 @@ async def attach_photos(
     http_client: Optional[httpx.AsyncClient] = None,
     reasons: Optional[List[str]] = None,
     used_ids: Optional[set] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, int]:
     """Busca y verifica con visión una foto real para cada receta, modificándolas en el sitio.
 
@@ -552,6 +587,8 @@ async def attach_photos(
     Si se pasa `reasons` (lista), se rellena con el motivo de cada receta, en el mismo orden.
     Si se pasa `used_ids`, ese conjunto de ids de foto se usa y se actualiza (para no repetir fotos entre
     varias llamadas de una misma respuesta).
+    Si se pasa `user_id`, rigen además las cuotas por usuario (búsquedas de Unsplash por hora, visión por día);
+    sin él no hay tope por usuario (scripts de evaluación).
     """
     stats = {"searches": 0, "cache_hits": 0, "vision_calls": 0, "approved_vision": 0, "vision_failed": 0, "no_photo": 0}
     local_reasons: List[str] = []
@@ -562,7 +599,7 @@ async def attach_photos(
         if items and settings.UNSPLASH_ACCESS_KEY:
             async def _run(client: httpx.AsyncClient) -> None:
                 await asyncio.wait_for(
-                    asyncio.gather(*(_safe_process(r, client, stats, used, local_reasons, i) for i, r in enumerate(items))),
+                    asyncio.gather(*(_safe_process(r, client, stats, used, local_reasons, i, user_id) for i, r in enumerate(items))),
                     timeout=settings.PHOTO_TIME_BUDGET_SECONDS,
                 )
 
