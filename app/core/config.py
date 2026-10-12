@@ -89,7 +89,8 @@ class Settings:
 
     # AI Config (DeepSeek)
     AI_PROVIDER: str = os.getenv("AI_PROVIDER", "deepseek")
-    DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY") or os.getenv("GEMINI_API_KEY", "")
+    # Sin DEEPSEEK_API_KEY no se cae en silencio a otra clave (GEMINI_API_KEY es de otro proveedor).
+    DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "").strip()
     DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
     DEEPSEEK_CHAT_MODEL: str = os.getenv("DEEPSEEK_CHAT_MODEL", "deepseek-chat")
     DEEPSEEK_BASE_URL: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
@@ -105,7 +106,16 @@ class Settings:
     # Tope diario de llamadas de visión (únicas con costo) y presupuesto de tiempo total de las fotos
     VISION_DAILY_CAP: int = int(os.getenv("VISION_DAILY_CAP", "50"))
     PHOTO_TIME_BUDGET_SECONDS: float = float(os.getenv("PHOTO_TIME_BUDGET_SECONDS", "20"))
+    # Topes por usuario (en memoria): protegen la cuota compartida de toda la app contra un solo usuario.
+    UNSPLASH_PER_USER_HOURLY: int = int(_float_env("UNSPLASH_PER_USER_HOURLY", 12))
+    VISION_PER_USER_DAILY: int = int(_float_env("VISION_PER_USER_DAILY", 15))
+    RECIPES_PER_USER_DAILY: int = int(_float_env("RECIPES_PER_USER_DAILY", 40))
 
 
 settings = Settings()
+
+if not settings.DEEPSEEK_API_KEY and os.getenv("GEMINI_API_KEY"):
+    _config_logger.warning(
+        "Falta DEEPSEEK_API_KEY: GEMINI_API_KEY ya no se usa como respaldo (es de otro proveedor)."
+    )
 
