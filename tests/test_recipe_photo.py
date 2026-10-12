@@ -128,7 +128,8 @@ def test_vision_approval_sets_image_credit_and_pings_download():
     assert client.searches[0] == {"query": "tomato scrambled eggs", "per_page": 5, "orientation": "landscape", "content_filter": "high"}
     assert client.search_headers_seen[0] == {"Authorization": "Client-ID u-key", "Accept-Version": "v1"}
     payload = client.vision_payloads[0]
-    assert payload["max_tokens"] == 1024 and payload["temperature"] == 0
+    assert payload["max_tokens"] == 2048 and payload["temperature"] == 0
+    assert payload["thinking"] == {"type": "disabled"}
     assert payload["response_format"] == {"type": "json_object"}
     image_part = payload["messages"][0]["content"][1]
     assert image_part == {"type": "image_url", "image_url": {"url": "https://images.unsplash.com/p1-small", "detail": "low"}}

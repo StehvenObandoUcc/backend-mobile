@@ -39,7 +39,7 @@ BLOCK_SECONDS = 10 * 60
 CACHE_TTL_SECONDS = 24 * 60 * 60
 CACHE_MAX_ENTRIES = 500
 RESULTS_PER_QUERY = 5
-VISION_MAX_TOKENS = 1024
+VISION_MAX_TOKENS = 2048
 VISION_LOG_CONTENT_CHARS = 120
 
 # Términos que, si la foto los menciona y no son protagonistas ni parte del plato, delatan un plato equivocado:
@@ -345,6 +345,7 @@ async def _vision_approves(client: httpx.AsyncClient, photo: Dict[str, Any], dis
             ],
         }],
         "max_tokens": VISION_MAX_TOKENS,
+        "thinking": {"type": "disabled"},
         "temperature": 0,
     }
     headers = {"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}", "Content-Type": "application/json"}

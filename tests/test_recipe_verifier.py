@@ -290,3 +290,15 @@ def test_service_steps_delivers_foreign_after_retry_but_never_avoided():
         asyncio.run(AIRecipeService.generate_recipe_steps(_steps_req(avoid_ingredients=["maní"]), http_client=client))
     assert exc.value.status_code == 422 and len(client.prompts) == 2
     assert "PROHIBIDOS" in client.prompts[0]
+
+
+def test_recipe_generation_payload_uses_max_tokens_3000():
+    class _CapturingClient(_FakeClient):
+        async def post(self, url, headers=None, json=None, timeout=None):
+            self.sent = json
+            return await super().post(url, headers=headers, json=json, timeout=timeout)
+
+    good = _ai_recipe([_ing("Tomate", "p-tom", 100, "grams"), _ing("Huevo", "p-hue", 2, "units")])
+    client = _CapturingClient([good])
+    asyncio.run(AIRecipeService.generate_recipes(_req(), http_client=client))
+    assert client.sent["max_tokens"] == 3000

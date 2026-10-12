@@ -335,7 +335,7 @@ Devuelve EXCLUSIVAMENTE un objeto JSON válido con la clave "recipes":
                 "response_format": {"type": "json_object"},
                 "messages": [{"role": "user", "content": prompt_text}],
                 "temperature": 0.7,
-                "max_tokens": 1500,
+                "max_tokens": 3000,
             }
 
             if http_client is not None:
