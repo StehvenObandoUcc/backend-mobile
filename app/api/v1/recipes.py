@@ -12,6 +12,7 @@ from app.schemas.recipe import (
 )
 from app.services.ai_recipe_service import AIRecipeService
 from app.services.auth_service import AuthService
+from app.services.recipe_photo import attach_photos, photos_available
 from app.core.config import settings
 from app.core.rate_limit import check_rate_limit, check_ai_rate_limit
 from app.core import db
@@ -205,7 +206,36 @@ async def generate_recipes(
     await check_ai_rate_limit(f"recipe_{user_id}", max_per_minute=settings.MAX_CALLS_PER_MINUTE)
     await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
     http_client = getattr(request.app.state, "http_client", None)
-    recipes = await AIRecipeService.generate_recipes(req, http_client=http_client, language=request_language(request))
+    language = request_language(request)
+    recipes = await AIRecipeService.generate_recipes(req, http_client=http_client, language=language)
+
+    # Foto real verificada (Unsplash). Nunca hace fallar la entrega mientras PHOTO_REQUIRED sea falso.
+    stats = await attach_photos(recipes, http_client=http_client)
+    logger.info(f"[Recipes] Fotos: {stats}")
+
+    if settings.PHOTO_REQUIRED:
+        seen_titles = [r.title for r in recipes]
+        recipes = [r for r in recipes if r.imageUri]
+        missing = req.count - len(recipes)
+        if missing > 0 and photos_available():
+            # UNA sola ronda extra, sin repetir los platos ya vistos. Nunca más rondas.
+            # Sin clave de Unsplash o con Unsplash bloqueado no se hace (no se gasta DeepSeek en vano).
+            try:
+                extra_req = req.model_copy(update={"count": missing})
+                extra = await AIRecipeService.generate_recipes(
+                    extra_req, http_client=http_client, language=language, exclude_titles=seen_titles
+                )
+                extra_stats = await attach_photos(extra, http_client=http_client)
+                logger.info(f"[Recipes] Fotos (ronda extra): {extra_stats}")
+                recipes.extend(r for r in extra if r.imageUri)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[Recipes] Ronda extra para fotos descartada ({type(exc).__name__}); se sigue con lo que hay.")
+        recipes = recipes[:req.count]
+        if not recipes:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="No pudimos armar una receta con foto verificada. Prueba otra selección de ingredientes.",
+            )
 
     # Almacenar en caché temporal (15s)
     RECIPE_CACHE[cache_key] = {"data": recipes, "timestamp": now}

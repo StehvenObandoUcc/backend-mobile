@@ -59,6 +59,16 @@ class Settings:
     DEEPSEEK_TIMEOUT_SECONDS: float = float(os.getenv("DEEPSEEK_TIMEOUT_SECONDS", "45"))
     MAX_CALLS_PER_MINUTE: int = int(os.getenv("MAX_CALLS_PER_MINUTE", "5"))
 
+    # Foto real verificada de cada receta (Unsplash modo demo, 50 búsquedas/hora para toda la app).
+    # Sin UNSPLASH_ACCESS_KEY no se hace ninguna llamada y las recetas salen sin foto.
+    UNSPLASH_ACCESS_KEY: str = os.getenv("UNSPLASH_ACCESS_KEY", "").strip()
+    UNSPLASH_APP_NAME: str = os.getenv("UNSPLASH_APP_NAME", "food_ai_assistant").strip() or "food_ai_assistant"
+    # Si es true, el endpoint solo entrega recetas que tengan foto verificada
+    PHOTO_REQUIRED: bool = os.getenv("PHOTO_REQUIRED", "false").strip().lower() in ("true", "1")
+    # Tope diario de llamadas de visión (únicas con costo) y presupuesto de tiempo total de las fotos
+    VISION_DAILY_CAP: int = int(os.getenv("VISION_DAILY_CAP", "50"))
+    PHOTO_TIME_BUDGET_SECONDS: float = float(os.getenv("PHOTO_TIME_BUDGET_SECONDS", "20"))
+
 
 settings = Settings()
 

@@ -121,11 +121,18 @@ def init_db():
                 steps TEXT,
                 is_saved BOOLEAN NOT NULL DEFAULT 1,
                 is_prepared BOOLEAN NOT NULL DEFAULT 0,
+                image_uri TEXT,
+                image_credit TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             """
         )
+        # Bases locales creadas antes de la foto de receta: añade las columnas (si ya existen, se ignora)
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(recipes);").fetchall()}
+        for column in ("image_uri", "image_credit"):
+            if column not in existing_cols:
+                conn.execute(f"ALTER TABLE recipes ADD COLUMN {column} TEXT;")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_recipes_user_id ON recipes(user_id);")
 
         conn.execute(
@@ -659,10 +666,44 @@ def _row_to_recipe_dict(row: Any) -> Dict[str, Any]:
         else:
             d[key] = []
 
+    d["imageUri"] = d.get("image_uri") or d.get("imageUri") or None
+    raw_credit = d.get("image_credit") if "image_credit" in d else d.get("imageCredit")
+    if isinstance(raw_credit, str):
+        try:
+            raw_credit = json.loads(raw_credit)
+        except Exception:
+            raw_credit = None
+    d["imageCredit"] = raw_credit if isinstance(raw_credit, dict) and raw_credit else None
+
     d["userId"] = d.get("user_id") or d.get("userId")
     d["createdAt"] = d.get("created_at") or d.get("createdAt")
     d["updatedAt"] = d.get("updated_at") or d.get("updatedAt")
     return d
+
+
+_IMAGE_CREDIT_KEYS = ("source", "name", "profileUrl", "sourceUrl")
+
+
+def _sanitize_image_uri(value: Any) -> Optional[str]:
+    """Acepta solo URLs https de hasta 2000 caracteres; cualquier otra cosa se descarta."""
+    if isinstance(value, str) and value.startswith("https://") and len(value) <= 2000:
+        return value
+    return None
+
+
+def _sanitize_image_credit(value: Any) -> Optional[str]:
+    """Serializa el crédito de la foto a JSON conservando solo las claves conocidas (valores str ≤ 300)."""
+    if not isinstance(value, dict):
+        return None
+    clean = {
+        k: value[k]
+        for k in _IMAGE_CREDIT_KEYS
+        if isinstance(value.get(k), str)
+        and value[k]
+        and len(value[k]) <= 300
+        and (k not in ("profileUrl", "sourceUrl") or value[k].startswith("https://"))
+    }
+    return json.dumps(clean) if clean else None
 
 
 def get_saved_recipes_by_user(user_id: str) -> List[Dict[str, Any]]:
@@ -681,7 +722,7 @@ def get_saved_recipes_by_user(user_id: str) -> List[Dict[str, Any]]:
             """
             SELECT id, user_id, title, description, prep_time_minutes, servings,
                    difficulty, match_score, available_ingredients, missing_ingredients,
-                   steps, is_saved, is_prepared, created_at, updated_at
+                   steps, is_saved, is_prepared, image_uri, image_credit, created_at, updated_at
             FROM recipes
             WHERE user_id = ?
             ORDER BY created_at DESC
@@ -750,35 +791,59 @@ def save_recipe(recipe: Dict[str, Any], user_id: str) -> Dict[str, Any]:
         "steps": steps_str,
         "is_saved": 1 if recipe.get("isSaved", True) else 0,
         "is_prepared": 1 if recipe.get("isPrepared", False) else 0,
+        "image_uri": _sanitize_image_uri(recipe.get("imageUri") or recipe.get("image_uri")),
+        "image_credit": _sanitize_image_credit(recipe.get("imageCredit") or recipe.get("image_credit")),
         "created_at": recipe.get("createdAt") or recipe.get("created_at") or now_iso,
         "updated_at": now_iso,
     }
-    # Campos modificables en una actualización (id, dueño y fecha de creación son inmutables)
+    # Campos modificables en una actualización (id, dueño y fecha de creación son inmutables).
+    # Si llega sin foto no se toca la que ya existe.
     updates = {k: v for k, v in record.items() if k not in ("id", "user_id", "created_at")}
+    if record["image_uri"] is None:
+        updates.pop("image_uri")
+    if record["image_credit"] is None:
+        # Sin foto, o foto sin crédito válido: no se pisa el crédito existente con NULL
+        updates.pop("image_credit")
 
     sb = get_supabase()
     if sb:
-        try:
-            existing_res = sb.table("recipes").select("id,user_id").eq("id", rec_id).execute()
-            if existing_res.data:
-                _reject_foreign_recipe(rec_id, existing_res.data[0].get("user_id"), user_id)
-                res = sb.table("recipes").update(updates).eq("id", rec_id).eq("user_id", user_id).execute()
-            else:
-                # insert (no upsert): si otro usuario inserta el mismo ID en paralelo, falla por PK
-                res = sb.table("recipes").insert(record).execute()
-            if res.data and len(res.data) > 0:
-                return _row_to_recipe_dict(res.data[0])
-            return _row_to_recipe_dict(record)
-        except HTTPException:
-            raise
-        except Exception as err:
-            err_str = str(err).lower()
-            if "duplicate key" in err_str or "23505" in err_str or "unique constraint" in err_str:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail=f"La receta con ID '{rec_id}' ya existe.",
-                ) from err
-            _db_unavailable(err, "Error guardando receta en Supabase")
+        image_fields = ("image_uri", "image_credit")
+        # Sin foto no se envían las columnas (así tampoco rompe si aún no corrieron la migración)
+        sb_record = {k: v for k, v in record.items() if k not in image_fields or v is not None}
+        sb_updates = dict(updates)
+        retried = False
+        while True:
+            try:
+                existing_res = sb.table("recipes").select("id,user_id").eq("id", rec_id).execute()
+                if existing_res.data:
+                    _reject_foreign_recipe(rec_id, existing_res.data[0].get("user_id"), user_id)
+                    res = sb.table("recipes").update(sb_updates).eq("id", rec_id).eq("user_id", user_id).execute()
+                else:
+                    # insert (no upsert): si otro usuario inserta el mismo ID en paralelo, falla por PK
+                    res = sb.table("recipes").insert(sb_record).execute()
+                if res.data and len(res.data) > 0:
+                    return _row_to_recipe_dict(res.data[0])
+                return _row_to_recipe_dict(record)
+            except HTTPException:
+                raise
+            except Exception as err:
+                err_str = str(err).lower()
+                if "duplicate key" in err_str or "23505" in err_str or "unique constraint" in err_str:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"La receta con ID '{rec_id}' ya existe.",
+                    ) from err
+                # Columnas de foto inexistentes (migración pendiente): un único reintento sin ellas
+                if not retried and ("image_uri" in err_str or "image_credit" in err_str):
+                    retried = True
+                    logger.warning(
+                        "Supabase no tiene las columnas de foto de receta (¿falta migrations/02_recipe_images.sql?); "
+                        "reintentando sin image_uri/image_credit."
+                    )
+                    sb_record = {k: v for k, v in sb_record.items() if k not in image_fields}
+                    sb_updates = {k: v for k, v in sb_updates.items() if k not in image_fields}
+                    continue
+                _db_unavailable(err, "Error guardando receta en Supabase")
 
     with get_connection() as conn:
         cursor = conn.cursor()
@@ -791,6 +856,14 @@ def save_recipe(recipe: Dict[str, Any], user_id: str) -> Dict[str, Any]:
                 f"UPDATE recipes SET {set_clauses} WHERE id = ? AND user_id = ?",
                 [*updates.values(), rec_id, user_id],
             )
+            if record["image_uri"] is None or record["image_credit"] is None:
+                # La respuesta refleja la foto y el crédito que se conservan
+                kept = conn.execute(
+                    "SELECT image_uri, image_credit FROM recipes WHERE id = ?", (rec_id,)
+                ).fetchone()
+                if kept:
+                    record["image_uri"] = kept["image_uri"]
+                    record["image_credit"] = kept["image_credit"]
         else:
             try:
                 conn.execute(
@@ -798,8 +871,8 @@ def save_recipe(recipe: Dict[str, Any], user_id: str) -> Dict[str, Any]:
                     INSERT INTO recipes (
                         id, user_id, title, description, prep_time_minutes, servings,
                         difficulty, match_score, available_ingredients, missing_ingredients,
-                        steps, is_saved, is_prepared, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        steps, is_saved, is_prepared, image_uri, image_credit, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         record["id"],
@@ -815,6 +888,8 @@ def save_recipe(recipe: Dict[str, Any], user_id: str) -> Dict[str, Any]:
                         record["steps"],
                         record["is_saved"],
                         record["is_prepared"],
+                        record["image_uri"],
+                        record["image_credit"],
                         record["created_at"],
                         record["updated_at"],
                     ),

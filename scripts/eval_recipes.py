@@ -4,6 +4,11 @@ Uso (desde la carpeta backend, con tu .env y el entorno virtual activos):
     python scripts/eval_recipes.py            # 8 despensas (≈ 8-16 llamadas a DeepSeek)
     python scripts/eval_recipes.py --n 15     # las 15 despensas
     python scripts/eval_recipes.py --n 3      # prueba rápida
+    python scripts/eval_recipes.py --n 8 --photos   # además busca y verifica la foto de cada receta
+
+Con --photos (requiere UNSPLASH_ACCESS_KEY; sin ella solo avisa y sigue sin fotos): Unsplash en modo demo
+permite 50 búsquedas/hora y 15 despensas × 2 recetas × hasta 2 búsquedas pueden pasarse; se recomienda
+`--n 8 --photos`. La verificación de visión gasta tokens de DeepSeek (tope VISION_DAILY_CAP).
 
 No imprime ni guarda claves. Escribe el resumen en scripts/eval_recipes_result.json
 (sin datos personales: solo nombres de ingredientes de prueba y contadores).
@@ -23,6 +28,7 @@ from fastapi import HTTPException  # noqa: E402
 from app.core.config import settings  # noqa: E402
 from app.schemas.recipe import RecipeGenerateRequest  # noqa: E402
 from app.services import ai_recipe_service  # noqa: E402
+from app.services.recipe_photo import alt_text_for, attach_photos  # noqa: E402
 from app.services.ai_recipe_service import AIRecipeService  # noqa: E402
 from app.services.recipe_verifier import names_overlap  # noqa: E402
 
@@ -54,12 +60,18 @@ SCENARIOS = [
 ]
 
 
-async def main(n: int):
+async def main(n: int, photos: bool = False):
     if not settings.DEEPSEEK_API_KEY:
         print("Falta DEEPSEEK_API_KEY en tu .env. Aborto sin gastar nada.")
         return 1
 
+    if photos and not settings.UNSPLASH_ACCESS_KEY:
+        print("Aviso: falta UNSPLASH_ACCESS_KEY en tu .env; se omite --photos (no se harán fotos).")
+        photos = False
+
     stats = {"first_attempt_rejects": 0, "verifier_calls": 0, "repairs": 0}
+    photo_stats = {"searches": 0, "cache_hits": 0, "vision_calls": 0, "approved_vision": 0, "approved_text": 0, "no_photo": 0}
+    photo_details = []
     original = ai_recipe_service.verify_recipe
 
     def counting(recipe, pantry, avoid=None, **kw):
@@ -88,6 +100,18 @@ async def main(n: int):
             recipes = await AIRecipeService.generate_recipes(req)
             row["ok"], row["recipes"] = True, len(recipes)
             total_recipes += len(recipes)
+            if photos:
+                for k, v in (await attach_photos(recipes)).items():
+                    photo_stats[k] += v
+                for r in recipes:
+                    photo_details.append({
+                        "scenario": name,
+                        "title": r.title,
+                        "dishNameEn": r.dishNameEn,
+                        "mainIngredientsEn": r.mainIngredientsEn,
+                        "imageUri": r.imageUri,
+                        "altText": alt_text_for(r.imageUri) if r.imageUri else None,
+                    })
             ids = {p["id"] for p in pantry}
             for r in recipes:
                 for ing in r.availableIngredients:
@@ -119,15 +143,27 @@ async def main(n: int):
         if stats["verifier_calls"] else 0,
         "reparaciones_aplicadas": stats["repairs"],
         "segundos_promedio": round(sum(r["seconds"] for r in rows) / done, 1) if done else 0,
-        "detalle": rows,
     }
+    if photos:
+        with_photo = sum(1 for d in photo_details if d["imageUri"])
+        summary.update({
+            "recetas_con_foto": with_photo,
+            "pct_con_foto": round(100 * with_photo / total_recipes, 1) if total_recipes else 0,
+            "aprobadas_por_vision": photo_stats["approved_vision"],
+            "aprobadas_solo_texto": photo_stats["approved_text"],
+            "llamadas_vision": photo_stats["vision_calls"],
+            "busquedas_unsplash": photo_stats["searches"],
+        })
+    summary["detalle"] = rows
+    if photos:
+        summary["detalle_fotos"] = photo_details  # para revisar a mano si alguna foto es equivocada
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_recipes_result.json")
     with open(out, "w", encoding="utf-8") as fh:
         json.dump(summary, fh, ensure_ascii=False, indent=2)
 
     print("\n=== RESUMEN ===")
     for k, v in summary.items():
-        if k != "detalle":
+        if k not in ("detalle", "detalle_fotos"):
             print(f"{k}: {v}")
     print("\nMetas: ingredientes inventados tras verificar = 0 · rechazo del verificador < 10 % · éxito >= 90 %")
     print(f"Resultado guardado en {out}")
@@ -137,5 +173,6 @@ async def main(n: int):
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--n", type=int, default=8, help="cuántas despensas probar (1-15)")
+    ap.add_argument("--photos", action="store_true", help="buscar y verificar la foto de cada receta (Unsplash)")
     args = ap.parse_args()
-    raise SystemExit(asyncio.run(main(max(1, min(args.n, len(SCENARIOS))))))
+    raise SystemExit(asyncio.run(main(max(1, min(args.n, len(SCENARIOS))), photos=args.photos)))
