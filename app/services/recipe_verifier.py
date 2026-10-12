@@ -20,6 +20,8 @@ STAPLES = {
     "sal", "agua", "pimienta", "aceite", "azucar", "vinagre", "oregano", "comino", "canela",
     "laurel", "tomillo", "romero", "salt", "water", "pepper", "oil", "sugar",
 }
+# Máximo de ingredientes distintos de la despensa por receta: más suele ser una fusión forzada.
+MAX_PANTRY_PER_RECIPE = 6
 STOP_WORDS = {"de", "la", "el", "en", "y", "a", "los", "las", "un", "una", "del", "al", "con", "sin", "para", "por"}
 
 # Unidad -> (familia, factor a la unidad base g / ml).
@@ -199,8 +201,17 @@ def verify_recipe(
     if distinct < needed:
         return _reject(f"Usa solo {distinct} de los ingredientes elegidos; debe usar al menos {needed}", repairs)
 
-    recipe.availableIngredients = kept
-    recipe.missingIngredients = list(recipe.missingIngredients) + moved
+    # 3b) Máximo de la despensa por receta: entra al reintento correctivo existente (sin bucles nuevos).
+    if distinct > MAX_PANTRY_PER_RECIPE:
+        return _reject(
+            f"Usa {distinct} ingredientes de la despensa; máximo {MAX_PANTRY_PER_RECIPE}: "
+            "elige solo los que combinen en un plato clásico",
+            repairs,
+        )
+
+    # Mismos topes que RecipeResponse (≤ 50 por lista) al reasignar
+    recipe.availableIngredients = kept[:50]
+    recipe.missingIngredients = (list(recipe.missingIngredients) + moved)[:50]
 
     # 4) matchScore real: ingredientes de la despensa / (esos + faltantes obligatorios).
     required_missing = [m for m in recipe.missingIngredients if isinstance(m, dict) and not m.get("isOptional")]
