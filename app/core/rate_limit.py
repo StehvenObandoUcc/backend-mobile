@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections import deque
+from typing import Optional
 from time import monotonic
 from fastapi import HTTPException, Request, status
 
@@ -43,6 +44,7 @@ async def check_rate_limit(max_per_minute: int = 5):
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"Límite de prueba alcanzado ({max_per_minute} peticiones/minuto). Espera un momento antes de volver a intentar.",
+                headers={"X-Error-Code": "rate_limited"},
             )
         _calls.append(now)
         _total_calls += 1
@@ -113,8 +115,81 @@ async def check_ai_rate_limit(client_identifier: str, max_per_minute: int = 5):
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"Has alcanzado el límite de {max_per_minute} fotos o consultas por minuto. Estamos en fase de pruebas para proteger los recursos de la API.",
+                headers={"X-Error-Code": "rate_limited"},
             )
         calls.append(now)
+
+
+# ── Topes por usuario en ventana deslizante (en memoria, por proceso) ──
+# Cada clave guarda SU propia ventana junto a sus entradas (token, instante): la poda usa la ventana de cada una,
+# así una búsqueda de 1 h nunca borra entradas de visión o recetas de 24 h.
+_user_quota: dict[tuple, tuple[float, deque]] = {}
+_user_quota_seq = 0
+_USER_QUOTA_PRUNE_THRESHOLD = 500
+NO_QUOTA_TOKEN = 0  # «sin tope por usuario»: no se registró nada, devolverlo no hace nada
+
+
+def consume_user_quota(bucket: str, user_id: str, limit: int, window_seconds: float) -> Optional[int]:
+    """Gasta una unidad del tope de `user_id` en `bucket`. Devuelve un token (para `refund_user_quota`) o
+    None si ya se agotó en la ventana.
+
+    Síncrono y sin await entre comprobar y registrar (seguro entre tareas asyncio). `limit <= 0` o sin
+    `user_id` = sin tope por usuario (devuelve NO_QUOTA_TOKEN sin registrar nada). Compara con `is None`.
+    """
+    global _user_quota_seq
+    if not user_id or limit <= 0:
+        return NO_QUOTA_TOKEN
+    now = monotonic()
+    if len(_user_quota) > _USER_QUOTA_PRUNE_THRESHOLD:
+        for k in [k for k, (win, d) in _user_quota.items() if not d or now - d[-1][1] > win]:
+            _user_quota.pop(k, None)
+    key = (bucket, user_id)
+    entry = _user_quota.get(key)
+    if entry is None:
+        entry = _user_quota[key] = (window_seconds, deque())
+    _, calls = entry
+    _user_quota[key] = (window_seconds, calls)
+    while calls and now - calls[0][1] > window_seconds:
+        calls.popleft()
+    if len(calls) >= limit:
+        return None
+    _user_quota_seq += 1
+    calls.append((_user_quota_seq, now))
+    return _user_quota_seq
+
+
+def refund_user_quota(bucket: str, user_id: str, token: Optional[int]) -> None:
+    """Devuelve la unidad EXACTA reservada (la del token); si ya salió de la ventana o no hubo tope, no hace nada."""
+    if not token:
+        return
+    entry = _user_quota.get((bucket, user_id))
+    if not entry:
+        return
+    calls = entry[1]
+    for item in calls:
+        if item[0] == token:
+            calls.remove(item)
+            return
+
+
+def check_user_daily_recipes(bucket: str, user_id: str) -> Optional[int]:
+    """Tope diario de generaciones por usuario (RECIPES_PER_USER_DAILY); 429 con mensaje claro al superarlo.
+    Devuelve el token de la unidad gastada (para devolverla con `refund_user_daily_recipes` si el servidor falla)."""
+    from app.core.config import settings  # import local: evita ciclos al cargar el módulo
+
+    token = consume_user_quota(f"recipes_{bucket}", user_id, settings.RECIPES_PER_USER_DAILY, 24 * 60 * 60)
+    if token is None:
+        logger.warning("[RateLimit] Tope diario de recetas (%s) alcanzado para %s.", bucket, user_id)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Llegaste al límite diario de recetas. Vuelve mañana.",
+            headers={"X-Error-Code": "daily_recipe_limit"},
+        )
+    return token
+
+
+def refund_user_daily_recipes(bucket: str, user_id: str, token: Optional[int]) -> None:
+    refund_user_quota(f"recipes_{bucket}", user_id, token)
 
 
 def reset_rate_limits():
@@ -124,3 +199,4 @@ def reset_rate_limits():
     _total_calls = 0
     _auth_attempts.clear()
     _ai_client_calls.clear()
+    _user_quota.clear()
