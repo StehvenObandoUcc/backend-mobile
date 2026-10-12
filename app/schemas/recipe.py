@@ -1,7 +1,7 @@
 import logging
 import re
 from datetime import datetime
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field, StringConstraints, field_validator
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,15 @@ class RecipeResponse(BaseModel):
     # Términos genéricos en inglés para buscar la foto
     dishNameEn: Optional[str] = None
     mainIngredientsEn: List[str] = Field(default_factory=list)
+    # Perfil de sabor declarado por la IA; sirve para la regla R4 de culinary_rules. No se guarda en la BD.
+    flavorProfile: Optional[Literal["sweet", "savory"]] = None
+
+    @field_validator("flavorProfile", mode="before")
+    @classmethod
+    def sanitize_flavor_profile(cls, v: Any) -> Optional[str]:
+        """Un valor inválido es None, nunca un error."""
+        cleaned = v.strip().lower() if isinstance(v, str) else None
+        return cleaned if cleaned in ("sweet", "savory") else None
 
 
 class RecipeGenerateRequest(BaseModel):
