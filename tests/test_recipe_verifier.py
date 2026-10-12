@@ -185,12 +185,8 @@ def _req(**kw):
 
 @pytest.fixture(autouse=True)
 def _key(monkeypatch):
+    # El límite global ya no se cuenta dentro del servicio (solo en la ruta): nada que desactivar aquí.
     monkeypatch.setattr(ai_recipe_service.settings, "DEEPSEEK_API_KEY", "test-key", raising=False)
-
-    async def _no_limit(*a, **k):
-        return None
-
-    monkeypatch.setattr(ai_recipe_service, "check_rate_limit", _no_limit)
 
 
 def test_service_prompt_contains_ids_and_identity_rule():
