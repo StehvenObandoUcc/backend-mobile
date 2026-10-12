@@ -6,12 +6,17 @@ Uso (desde la carpeta backend, con tu .env y el entorno virtual activos):
     python scripts/eval_recipes.py --n 3      # prueba rápida
     python scripts/eval_recipes.py --n 8 --photos   # además busca y verifica la foto de cada receta
     python scripts/eval_recipes.py --n 17 --photos  # las 17 primeras (incluye las 2 variadas; las 3 incoherentes van con --incoherentes) (≈ 40 búsquedas)
+    # Hay 22 despensas: 17 + las 3 incoherentes (--incoherentes) + las 2 de excepciones tradicionales (--excepciones).
     python scripts/eval_recipes.py --incoherentes --pasos --photos
         # solo las 3 despensas sin relación entre sí («incoherente-mezcla», «incoherente-extremo», «incoherente-snacks»),
         # con receta completa y pasos. Costo aprox.: 3 despensas x 2 recetas = ~3-6 llamadas de recetas (1-2 por
         # despensa) + hasta 6 de pasos (1 por receta, 2 si hay reintento) + hasta 12 búsquedas de Unsplash.
     python scripts/eval_recipes.py --solo incoherente-mezcla,incoherente-extremo   # nombres separados por coma (ignora --n)
         # un nombre desconocido imprime la lista válida y sale con código 2 sin gastar llamadas.
+    python scripts/eval_recipes.py --excepciones --photos
+        # solo «excepciones-tradicionales» (pollo, piña, pimentón, cebolla, salsa de soya, chocolate oscuro: el mole o la
+        # hawaiana SÍ pueden mezclar dulce y salado) y «maduro-queso» (plátano maduro con queso y bocadillo: clásico dulce-salado
+        # donde ninguna regla debe rechazar). Se pueden combinar: --incoherentes --excepciones.
     --pasos: además llama a generate_recipe_steps por cada receta entregada (si falla, registra el error y sigue).
     En las despensas incoherentes lo correcto es una receta simple con 2-3 ingredientes que sí combinen, o un fallo
     limpio (422); NUNCA una fusión de ingredientes que no tienen nada que ver. Un 422 es un resultado válido.
@@ -21,6 +26,12 @@ permite 50 búsquedas/hora y 15 despensas × 2 recetas × hasta 2 búsquedas pue
 `--n 8 --photos`; cuando haya cupo de Unsplash (≈ 40 búsquedas para las 17 despensas) usa `--n 17 --photos`.
 Las dos últimas despensas («variada-dulce-salada» y «variada-grande») miden las fusiones raras: por cada receta
 se informa cuántos ingredientes de la despensa usa (meta: 2 a 6) y su dishNameEn. La verificación de visión gasta tokens de DeepSeek (tope VISION_DAILY_CAP).
+
+Costo y reglas (se imprimen y se guardan en el JSON): tokens de entrada/salida y llamadas por tipo (recetas, pasos, visión)
+leídos del `usage` de DeepSeek (app/services/ai_usage.py), `tokens_por_receta_aceptada` (todos los tokens / recetas entregadas),
+`reintentos` (llamadas de recetas por encima de una por despensa), `rechazos_por_regla` (R1..R4 culinarias, verificador y
+coherencia: cuenta cada receta rechazada, incluidos los rechazos que luego se corrigen en el reintento), `db_cache_hits` de fotos
+(con --photos; la tabla dish_photos es la de SQLite local o Supabase, según tu .env) y el `flavorProfile` de cada receta.
 
 No imprime ni guarda claves. Escribe el resumen en scripts/eval_recipes_result.json
 (sin datos personales: solo nombres de ingredientes de prueba y contadores).
@@ -39,7 +50,7 @@ from fastapi import HTTPException  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
 from app.schemas.recipe import RecipeGenerateRequest, RecipeStepsRequest  # noqa: E402
-from app.services import ai_recipe_service  # noqa: E402
+from app.services import ai_recipe_service, ai_usage  # noqa: E402
 from app.services.recipe_photo import alt_text_for, attach_photos  # noqa: E402
 from app.services.ai_recipe_service import AIRecipeService  # noqa: E402
 from app.services.recipe_verifier import names_overlap  # noqa: E402
@@ -95,8 +106,18 @@ SCENARIOS = [
         ("Leche condensada", 1, "units"), ("Salchichas", 6, "units"), ("Piña", 1, "units"),
         ("Mayonesa", 200, "grams"), ("Cereal de chocolate", 300, "grams"), ("Limón", 3, "units"),
     ), []),
+    # Excepciones tradicionales (al FINAL, tras las incoherentes): lo correcto es una receta clásica; el mole o la hawaiana
+    # pueden mezclar dulce y salado, y plátano maduro con queso y bocadillo no debe rechazarse
+    ("excepciones-tradicionales", P(
+        ("Pollo", 600, "grams"), ("Piña", 1, "units"), ("Pimentón", 2, "units"), ("Cebolla", 2, "units"),
+        ("Salsa de soya", 150, "milliliters"), ("Chocolate oscuro", 100, "grams"),
+    ), []),
+    ("maduro-queso", P(
+        ("Plátano maduro", 3, "units"), ("Queso campesino", 250, "grams"), ("Bocadillo de guayaba", 1, "units"),
+    ), []),
 ]
 INCOHERENTES = ["incoherente-mezcla", "incoherente-extremo", "incoherente-snacks"]
+EXCEPCIONES = ["excepciones-tradicionales", "maduro-queso"]
 
 
 def _fmt_ing(i):
@@ -114,7 +135,13 @@ async def main(selected, photos: bool = False, pasos: bool = False):
         photos = False
 
     stats = {"first_attempt_rejects": 0, "verifier_calls": 0, "repairs": 0}
-    photo_stats = {"searches": 0, "cache_hits": 0, "vision_calls": 0, "approved_vision": 0, "vision_failed": 0, "no_photo": 0}
+    rejects = {"R1": 0, "R2": 0, "R3": 0, "R4": 0, "verificador": 0, "coherencia": 0}
+    retries = 0
+    ai_usage.reset()
+    photo_stats = {
+        "searches": 0, "cache_hits": 0, "db_cache_hits": 0, "vision_calls": 0, "approved_vision": 0,
+        "vision_failed": 0, "no_photo": 0,
+    }
     photo_details = []
     original = ai_recipe_service.verify_recipe
 
@@ -124,9 +151,28 @@ async def main(selected, photos: bool = False, pasos: bool = False):
         stats["repairs"] += len(res.repairs)
         if not res.ok:
             stats["first_attempt_rejects"] += 1
+            rejects["verificador"] += 1
         return res
 
     ai_recipe_service.verify_recipe = counting
+
+    original_culinary = ai_recipe_service.check_culinary
+    original_sanity = ai_recipe_service.validate_recipe_sanity
+
+    def counting_culinary(recipe, pantry=None):
+        ok_c, rule, reason = original_culinary(recipe, pantry)
+        if not ok_c and rule in rejects:
+            rejects[rule] += 1
+        return ok_c, rule, reason
+
+    def counting_sanity(recipe):
+        ok_s, reason = original_sanity(recipe)
+        if not ok_s:
+            rejects["coherencia"] += 1
+        return ok_s, reason
+
+    ai_recipe_service.check_culinary = counting_culinary
+    ai_recipe_service.validate_recipe_sanity = counting_sanity
 
     # Los límites (por minuto y por usuario) viven en la ruta, no en el servicio: aquí se llama al servicio
     # directo y attach_photos sin user_id (sin tope por usuario), así que no falsean los resultados.
@@ -136,6 +182,7 @@ async def main(selected, photos: bool = False, pasos: bool = False):
     for name, pantry, avoid in selected:
         req = RecipeGenerateRequest(ingredients=pantry, count=2, avoid_ingredients=avoid, max_prep_time=30)
         t0 = time.time()
+        calls_before = ai_usage.snapshot()["recipes"]["calls"]
         row = {"scenario": name, "ok": False, "seconds": 0.0, "recipes": 0, "error": None}
         try:
             recipes = await AIRecipeService.generate_recipes(req)
@@ -163,6 +210,7 @@ async def main(selected, photos: bool = False, pasos: bool = False):
                     "title": r.title,
                     "description": r.description,
                     "dishNameEn": r.dishNameEn,
+                    "flavorProfile": r.flavorProfile,
                     "availableIngredients": [{"name": i.get("name"), "quantity": i.get("quantity"), "unit": i.get("unit")} for i in r.availableIngredients],
                     "missingIngredients": r.missingIngredients,
                     "ingredientes_de_despensa_no_usados": [p["name"] for p in pantry if p["id"] not in used_ids],
@@ -190,6 +238,7 @@ async def main(selected, photos: bool = False, pasos: bool = False):
                     "scenario": name,
                     "title": r.title,
                     "dishNameEn": r.dishNameEn,
+                    "flavorProfile": r.flavorProfile,
                     "ingredientes_de_despensa_usados": used,
                     "ingredientes_de_despensa_total": len(pantry),
                 })
@@ -205,14 +254,15 @@ async def main(selected, photos: bool = False, pasos: bool = False):
         except Exception as exc:  # noqa: BLE001
             row["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
         row["seconds"] = round(time.time() - t0, 1)
+        retries += max(0, ai_usage.snapshot()["recipes"]["calls"] - calls_before - 1)  # 1 llamada por despensa es lo normal
         rows.append(row)
         print(f"{'OK ' if row['ok'] else 'FALLA'} {name:<18} {row['seconds']:>5}s  recetas={row['recipes']}  {row['error'] or ''}")
-        if name in INCOHERENTES:
+        if name in INCOHERENTES or name in EXCEPCIONES:
             print(f"  Despensa: {', '.join(p['name'] for p in pantry)}")
             if not row["ok"]:
                 print(f"  Sin recetas (resultado válido): {row['error']}")
             for fr in (f for f in full_recipes if f["scenario"] == name):
-                print(f"  - {fr['title']}  [{fr['dishNameEn']}]")
+                print(f"  - {fr['title']}  [{fr['dishNameEn']}]  perfil={fr['flavorProfile']}")
                 print(f"    {fr['description']}")
                 print(f"    Usados de la despensa: {', '.join(_fmt_ing(i) for i in fr['availableIngredients']) or '(ninguno)'}")
                 print(f"    Faltan: {', '.join(_fmt_ing(i) for i in fr['missingIngredients']) or '(nada)'}")
@@ -223,6 +273,10 @@ async def main(selected, photos: bool = False, pasos: bool = False):
                 elif fr.get("pasos_error"):
                     print(f"    Pasos: error {fr['pasos_error']}")
 
+    ai_recipe_service.check_culinary = original_culinary
+    ai_recipe_service.validate_recipe_sanity = original_sanity
+    ai_recipe_service.verify_recipe = original
+    usage = ai_usage.snapshot()
     done = len(rows)
     ok = sum(1 for r in rows if r["ok"])
     summary = {
@@ -236,6 +290,14 @@ async def main(selected, photos: bool = False, pasos: bool = False):
         "tasa_rechazo_verificador_pct": round(100 * stats["first_attempt_rejects"] / stats["verifier_calls"], 1)
         if stats["verifier_calls"] else 0,
         "reparaciones_aplicadas": stats["repairs"],
+        "rechazos_por_regla": rejects,
+        "reintentos": retries,
+        "uso_deepseek": usage,
+        "tokens_de_entrada": usage["total"]["prompt_tokens"],
+        "tokens_de_salida": usage["total"]["completion_tokens"],
+        "tokens_por_receta_aceptada": round(
+            (usage["total"]["prompt_tokens"] + usage["total"]["completion_tokens"]) / total_recipes
+        ) if total_recipes else None,
         "segundos_promedio": round(sum(r["seconds"] for r in rows) / done, 1) if done else 0,
     }
     if photos:
@@ -247,6 +309,7 @@ async def main(selected, photos: bool = False, pasos: bool = False):
             "fallos_vision": photo_stats["vision_failed"],
             "llamadas_vision": photo_stats["vision_calls"],
             "busquedas_unsplash": photo_stats["searches"],
+            "db_cache_hits": photo_stats["db_cache_hits"],
         })
     if recipe_details:
         counts = [d["ingredientes_de_despensa_usados"] for d in recipe_details]
@@ -256,7 +319,7 @@ async def main(selected, photos: bool = False, pasos: bool = False):
     summary["detalle"] = rows
     summary["detalle_recetas"] = recipe_details
     if photos:
-        # motivo: aprobada / vision_no / vision_fallo / sin_candidatas / sin_cupo / unsplash_bloqueado / repetida /
+        # motivo: aprobada / vision_no (o «vision_no: <motivo del modelo>») / vision_fallo / sin_candidatas / sin_cupo / unsplash_bloqueado / repetida /
         # tiempo_agotado / sin_protagonistas (o error). Para revisar a mano si alguna foto es equivocada.
         summary["detalle_fotos"] = photo_details
     out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "eval_recipes_result.json")
@@ -267,9 +330,10 @@ async def main(selected, photos: bool = False, pasos: bool = False):
     for k, v in summary.items():
         if k not in ("detalle", "detalle_fotos", "detalle_recetas"):
             print(f"{k}: {v}")
-    print("\nRecetas (ingredientes de la despensa usados · dishNameEn):")
+    print("\nRecetas (ingredientes de la despensa usados · perfil · dishNameEn):")
     for d in recipe_details:
-        print(f"  {d['scenario']:<22} {d['ingredientes_de_despensa_usados']}/{d['ingredientes_de_despensa_total']}  {d['dishNameEn']}  <- {d['title']}")
+        print(f"  {d['scenario']:<26} {d['ingredientes_de_despensa_usados']}/{d['ingredientes_de_despensa_total']}  "
+              f"{d['flavorProfile'] or '-':<7}  {d['dishNameEn']}  <- {d['title']}")
     print("\nMetas: ingredientes inventados tras verificar = 0 · rechazo del verificador < 10 % · éxito >= 90 %")
     print(f"Resultado guardado en {out}")
     return 0
@@ -281,13 +345,16 @@ if __name__ == "__main__":
     ap.add_argument("--photos", action="store_true", help="buscar y verificar la foto de cada receta (Unsplash)")
     ap.add_argument("--solo", default=None, help="despensas a ejecutar, separadas por coma (ignora --n)")
     ap.add_argument("--incoherentes", action="store_true", help="atajo: las 3 despensas incoherentes")
+    ap.add_argument("--excepciones", action="store_true", help="atajo: las 2 despensas de excepciones tradicionales")
     ap.add_argument("--pasos", action="store_true", help="genera también los pasos de cada receta entregada")
     args = ap.parse_args()
     by_name = {s[0]: s for s in SCENARIOS}
-    if args.solo is not None or args.incoherentes:
+    if args.solo is not None or args.incoherentes or args.excepciones:
         names = [x.strip() for x in (args.solo or "").split(",") if x.strip()]
         if args.incoherentes:
             names += [x for x in INCOHERENTES if x not in names]
+        if args.excepciones:
+            names += [x for x in EXCEPCIONES if x not in names]
         unknown = [x for x in names if x not in by_name]
         if unknown or not names:
             print(f"Despensa(s) desconocida(s): {', '.join(unknown) or '(vacío)'}. Válidas: {', '.join(by_name)}")
