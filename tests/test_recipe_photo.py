@@ -382,12 +382,8 @@ def _ai_payload(**extra):
 
 @pytest.fixture
 def _ai(monkeypatch):
+    # El límite global ya no se cuenta dentro del servicio (solo en la ruta): nada que desactivar aquí.
     monkeypatch.setattr(ai_recipe_service.settings, "DEEPSEEK_API_KEY", "test-key", raising=False)
-
-    async def _no_limit(*a, **k):
-        return None
-
-    monkeypatch.setattr(ai_recipe_service, "check_rate_limit", _no_limit)
 
 
 def test_generate_parses_and_sanitizes_english_fields(_ai):
@@ -442,7 +438,7 @@ def _endpoint_env(monkeypatch, rounds, photo_for):
         titles = rounds[len(calls) - 1]
         return [_recipe(title=t) for t in titles]
 
-    async def fake_attach(recipes, http_client=None, reasons=None, used_ids=None):
+    async def fake_attach(recipes, http_client=None, reasons=None, used_ids=None, user_id=None):
         for r in recipes:
             if photo_for(r.title):
                 r.imageUri = f"https://img/{r.title}"
