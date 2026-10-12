@@ -69,6 +69,7 @@ app = FastAPI(
 cors_kwargs = {
     "allow_methods": ["*"],
     "allow_headers": ["*"],
+    "expose_headers": ["X-Error-Code"],
 }
 if "*" in settings.CORS_ORIGINS:
     cors_kwargs["allow_origins"] = ["*"]
