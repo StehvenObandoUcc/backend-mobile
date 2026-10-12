@@ -46,6 +46,15 @@ def _norm(text: Any) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9\s]", " ", value)).strip()
 
 
+def has_term(name: str, term: str) -> bool:
+    """¿`name` contiene `term` como palabra (o frase) completa, con plural simple?
+
+    Evita los falsos positivos por subcadena: «res» ya no coincide con «fresa», «fresco», «refresco» ni «tres»,
+    ni «ajo» con «ajonjolí». `name` y `term` vienen normalizados (minúsculas, sin tildes).
+    """
+    return re.search(r"(?<![a-z0-9])" + re.escape(term) + r"(?:s|es)?(?![a-z0-9])", name) is not None
+
+
 def _variants(word: str) -> set:
     """Formas posibles del singular: tomates -> tomate; limones -> limon."""
     out = {word}
