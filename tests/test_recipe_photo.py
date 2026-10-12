@@ -31,8 +31,9 @@ class _Resp:
         return self._data
 
 
-def _vision(is_food=True, matches=True):
-    payload = {"is_food_dish": is_food, "matches": matches, "reason": "prueba"}
+def _vision(is_food=True, same_type=True, main_visible=True):
+    payload = {"is_food_dish": is_food, "same_dish_type": same_type, "main_visible": main_visible,
+               "dish_type_seen": "prueba", "reason": "prueba"}
     return _Resp(200, {"choices": [{"message": {"content": json.dumps(payload)}}]})
 
 
@@ -136,7 +137,7 @@ def test_vision_approval_sets_image_credit_and_pings_download():
 
 
 def test_vision_says_no_leaves_recipe_without_photo_and_negative_cache_avoids_second_search():
-    client = _FakeClient(default=[_photo()], vision=[_vision(matches=False)])
+    client = _FakeClient(default=[_photo()], vision=[_vision(same_type=False)])
     r1 = _recipe()
     stats = _run([r1], client)
     assert r1.imageUri is None and stats["vision_calls"] == 1 and stats["no_photo"] == 1
@@ -222,7 +223,7 @@ def test_no_deepseek_key_means_no_photo_and_zero_searches(monkeypatch):
 
 
 def test_vision_response_wrapped_in_markdown_fence_is_approved():
-    content = '```json\n{"is_food_dish": true, "matches": true, "reason": "ok"}\n```'
+    content = '```json\n{"is_food_dish": true, "same_dish_type": true, "main_visible": true, "reason": "ok"}\n```'
     client = _FakeClient(default=[_photo()], vision=[_vision_raw(content)])
     r = _recipe()
     stats = _run([r], client)
@@ -230,7 +231,7 @@ def test_vision_response_wrapped_in_markdown_fence_is_approved():
 
 
 def test_vision_response_with_json_object_inside_text_is_approved():
-    content = 'Veo un plato.\n{"is_food_dish": true, "matches": true, "reason": "tiene {llaves} y \\"comillas\\""}\nFin.'
+    content = 'Veo un plato.\n{"is_food_dish": true, "same_dish_type": true, "main_visible": true, "reason": "tiene {llaves} y \\"comillas\\""}\nFin.'
     client = _FakeClient(default=[_photo()], vision=[_vision_raw(content)])
     r = _recipe()
     _run([r], client)
@@ -332,7 +333,7 @@ def test_ladder_falls_to_second_query_and_never_exceeds_two_searches():
 
 
 def test_ladder_skips_second_query_when_first_has_candidates():
-    client = _FakeClient(default=[_photo(alt="eggs with tomato")], vision=[_vision(matches=False)])
+    client = _FakeClient(default=[_photo(alt="eggs with tomato")], vision=[_vision(same_type=False)])
     _run([_recipe()], client)
     assert len(client.searches) == 1
 
@@ -542,7 +543,7 @@ def test_unsplash_500_no_retry_and_no_block():
 
 
 def test_is_food_dish_false_means_no_photo():
-    client = _FakeClient(default=[_photo()], vision=[_vision(is_food=False, matches=True)])
+    client = _FakeClient(default=[_photo()], vision=[_vision(is_food=False)])
     r = _recipe()
     _run([r], client)
     assert r.imageUri is None and client.downloads == []
@@ -683,7 +684,7 @@ def test_positive_cache_with_photo_already_used_in_batch_is_no_photo():
 
 
 def test_reasons_cover_no_protagonists_vision_no_and_no_candidates():
-    client = _FakeClient(default=[_photo()], vision=[_vision(matches=False)])
+    client = _FakeClient(default=[_photo()], vision=[_vision(same_type=False)])
     reasons = []
     asyncio.run(attach_photos([_recipe(mains=()), _recipe(dish="x y", mains=("rice",)), _recipe()], http_client=client, reasons=reasons))
     assert reasons == ["sin_protagonistas", "sin_candidatas", "vision_no"]
@@ -755,9 +756,9 @@ def test_vision_slot_is_returned_when_no_candidate_reaches_vision():
     assert recipe_photo._vision_state["count"] == 0
 
 
-@pytest.mark.parametrize("flags", [("yes", True), (True, "yes"), (1, True), (None, True)])
+@pytest.mark.parametrize("flags", [("yes", True, True), (True, "yes", True), (True, True, 1), (None, True, True)])
 def test_vision_non_bool_fields_are_parse_error_not_vision_no(flags):
-    payload = json.dumps({"is_food_dish": flags[0], "matches": flags[1]})
+    payload = json.dumps({"is_food_dish": flags[0], "same_dish_type": flags[1], "main_visible": flags[2]})
     client = _FakeClient(default=[_photo()], vision=[_vision_raw(payload)])
     reasons = []
     stats = asyncio.run(attach_photos([_recipe()], http_client=client, reasons=reasons))
@@ -807,3 +808,35 @@ def test_time_cut_after_photo_applied_keeps_reason_aprobada(monkeypatch):
     reasons = []
     asyncio.run(attach_photos([r], http_client=client, reasons=reasons))
     assert r.imageUri is not None and reasons == ["aprobada"]
+
+
+def test_same_dish_type_false_means_vision_no_without_photo():
+    client = _FakeClient(default=[_photo()], vision=[_vision(same_type=False)])
+    reasons = []
+    r = _recipe()
+    asyncio.run(attach_photos([r], http_client=client, reasons=reasons))
+    assert r.imageUri is None and reasons == ["vision_no"] and client.downloads == []
+
+
+def test_main_visible_false_means_no_photo():
+    client = _FakeClient(default=[_photo()], vision=[_vision(main_visible=False)])
+    reasons = []
+    r = _recipe()
+    asyncio.run(attach_photos([r], http_client=client, reasons=reasons))
+    assert r.imageUri is None and reasons == ["vision_no"] and client.downloads == []
+
+
+def test_missing_same_dish_type_is_parse_error_vision_fallo_not_cached():
+    payload = json.dumps({"is_food_dish": True, "main_visible": True, "reason": "falta el tipo"})
+    client = _FakeClient(default=[_photo()], vision=[_vision_raw(payload)])
+    reasons = []
+    stats = asyncio.run(attach_photos([_recipe()], http_client=client, reasons=reasons))
+    assert reasons == ["vision_fallo"] and stats["vision_failed"] == 1
+    assert len(recipe_photo._NEGATIVE_CACHE) == 0
+
+
+def test_vision_prompt_requires_dish_type_rule():
+    client = _FakeClient(default=[_photo()], vision=[_vision()])
+    _run([_recipe()], client)
+    text = client.vision_payloads[0]["messages"][0]["content"][0]["text"].lower()
+    assert "sopa" in text and "tortilla" in text and "same_dish_type" in text and "main_visible" in text

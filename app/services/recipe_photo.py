@@ -327,12 +327,22 @@ def _parse_vision_content(raw: str) -> Dict[str, Any]:
     return parsed
 
 
+_VISION_BOOL_FIELDS = ("is_food_dish", "same_dish_type", "main_visible")
+
+
 async def _vision_approves(client: httpx.AsyncClient, photo: Dict[str, Any], dish: str, mains: List[str]) -> bool:
     """Una llamada a DeepSeek con la miniatura. Lanza excepción si falla (red/formato)."""
     prompt = (
         f'Plato esperado: "{dish}". Ingredientes protagonistas: {", ".join(mains)}.\n'
-        "Mira la foto. ¿Muestra un plato de comida preparado y es plausible como ese plato con esos protagonistas?\n"
-        'Devuelve EXCLUSIVAMENTE un objeto JSON: {"is_food_dish": true, "matches": true, "reason": "motivo breve"}'
+        "Mira la foto y evalúa con criterio estricto:\n"
+        "1) is_food_dish: ¿es comida preparada y servida? No vale: ingredientes crudos sueltos, un menú o texto.\n"
+        "2) same_dish_type: ¿el TIPO de plato y su forma coinciden con el plato esperado? "
+        "Una sopa/caldo/guiso (con líquido) NO es un plato seco; una tortilla/omelette NO son huevos revueltos; "
+        "una ensalada NO es un plato caliente; una pasta NO es arroz; unas albóndigas NO son trozos ni filetes. "
+        "En caso de duda, false.\n"
+        "3) main_visible: ¿el protagonista principal (el primero de la lista) es visible o claramente plausible?\n"
+        'Devuelve EXCLUSIVAMENTE un objeto JSON: {"is_food_dish": true, "same_dish_type": true, '
+        '"main_visible": true, "dish_type_seen": "tipo de plato visto, corto", "reason": "motivo breve"}'
     )
     payload = {
         "model": settings.DEEPSEEK_MODEL,
@@ -363,7 +373,7 @@ async def _vision_approves(client: httpx.AsyncClient, photo: Dict[str, Any], dis
         finish_reason = choice.get("finish_reason")
         content = choice["message"].get("content") or ""
         parsed = _parse_vision_content(content)
-        if not isinstance(parsed.get("is_food_dish"), bool) or not isinstance(parsed.get("matches"), bool):
+        if not all(isinstance(parsed.get(k), bool) for k in _VISION_BOOL_FIELDS):
             raise ValueError("Respuesta de visión sin los campos booleanos esperados")
     except Exception as exc:  # noqa: BLE001
         # Diagnóstico: solo tipo de error, finish_reason y el inicio del contenido (nunca cabeceras ni claves)
@@ -372,7 +382,7 @@ async def _vision_approves(client: httpx.AsyncClient, photo: Dict[str, Any], dis
             f"contenido={str(content)[:VISION_LOG_CONTENT_CHARS]!r}"
         )
         raise _VisionParseError(type(exc).__name__) from exc
-    return parsed["is_food_dish"] is True and parsed["matches"] is True
+    return all(parsed[k] is True for k in _VISION_BOOL_FIELDS)
 
 
 def _build_photo_data(photo: Dict[str, Any]) -> Dict[str, Any]:
