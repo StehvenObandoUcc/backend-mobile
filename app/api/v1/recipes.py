@@ -14,7 +14,7 @@ from app.services.ai_recipe_service import AIRecipeService
 from app.services.auth_service import AuthService
 from app.services.recipe_photo import attach_photos, photos_available
 from app.core.config import settings
-from app.core.rate_limit import check_rate_limit, check_ai_rate_limit
+from app.core.rate_limit import check_rate_limit, check_ai_rate_limit, check_user_daily_recipes, refund_user_daily_recipes
 from app.core import db
 
 logger = logging.getLogger(__name__)
@@ -204,6 +204,25 @@ async def generate_recipes(
             del RECIPE_CACHE[cache_key]
 
     await check_ai_rate_limit(f"recipe_{user_id}", max_per_minute=settings.MAX_CALLS_PER_MINUTE)
+    daily_token = check_user_daily_recipes("generate", user_id)
+    try:
+        return await _generate_after_quota(req, request, user_id, cache_key, now)
+    except Exception as exc:  # noqa: BLE001
+        if _should_refund_daily(exc):
+            refund_user_daily_recipes("generate", user_id, daily_token)
+        raise
+
+
+def _should_refund_daily(exc: Exception) -> bool:
+    """El cupo diario se devuelve si la culpa no fue del usuario: excepción inesperada, 5xx del servidor/IA
+    o 429 del límite global (no se llegó a generar nada). Un 422 (la IA sí trabajó) no se devuelve."""
+    if isinstance(exc, HTTPException):
+        return exc.status_code >= 500 or exc.status_code == status.HTTP_429_TOO_MANY_REQUESTS
+    return True
+
+
+async def _generate_after_quota(req: RecipeGenerateRequest, request: Request, user_id: str, cache_key: tuple, now: float):
+    # Única comprobación del límite global por petición (el servicio y la ronda extra no vuelven a contar)
     await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
     http_client = getattr(request.app.state, "http_client", None)
     language = request_language(request)
@@ -211,7 +230,7 @@ async def generate_recipes(
 
     # Foto real verificada (Unsplash). Nunca hace fallar la entrega mientras PHOTO_REQUIRED sea falso.
     used_photo_ids: set = set()  # misma foto nunca dos veces en una respuesta (ronda extra incluida)
-    stats = await attach_photos(recipes, http_client=http_client, used_ids=used_photo_ids)
+    stats = await attach_photos(recipes, http_client=http_client, used_ids=used_photo_ids, user_id=user_id)
     logger.info(f"[Recipes] Fotos: {stats}")
 
     if settings.PHOTO_REQUIRED:
@@ -226,7 +245,7 @@ async def generate_recipes(
                 extra = await AIRecipeService.generate_recipes(
                     extra_req, http_client=http_client, language=language, exclude_titles=seen_titles
                 )
-                extra_stats = await attach_photos(extra, http_client=http_client, used_ids=used_photo_ids)
+                extra_stats = await attach_photos(extra, http_client=http_client, used_ids=used_photo_ids, user_id=user_id)
                 logger.info(f"[Recipes] Fotos (ronda extra): {extra_stats}")
                 recipes.extend(r for r in extra if r.imageUri)
             except Exception as exc:  # noqa: BLE001
@@ -254,7 +273,13 @@ async def get_recipe_steps(
 ) -> RecipeStepsResponse:
     """Fase 2 (Opción A Stateless): Genera los pasos detallados de preparación bajo demanda."""
     await check_ai_rate_limit(f"steps_{user_id}", max_per_minute=settings.MAX_CALLS_PER_MINUTE)
-    await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)
-    http_client = getattr(request.app.state, "http_client", None)
-    steps = await AIRecipeService.generate_recipe_steps(req, http_client=http_client, language=request_language(request))
+    daily_token = check_user_daily_recipes("steps", user_id)
+    try:
+        await check_rate_limit(settings.MAX_CALLS_PER_MINUTE)  # única comprobación global (el servicio no vuelve a contar)
+        http_client = getattr(request.app.state, "http_client", None)
+        steps = await AIRecipeService.generate_recipe_steps(req, http_client=http_client, language=request_language(request))
+    except Exception as exc:  # noqa: BLE001
+        if _should_refund_daily(exc):
+            refund_user_daily_recipes("steps", user_id, daily_token)
+        raise
     return RecipeStepsResponse(steps=steps)
