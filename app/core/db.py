@@ -165,6 +165,20 @@ def init_db():
         )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_shopping_items_user_id ON shopping_items(user_id);")
 
+        # Caché de fotos aprobadas por plato (sin datos personales; ver migrations/04_dish_photos.sql)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dish_photos (
+                dish_key TEXT PRIMARY KEY,
+                image_uri TEXT NOT NULL,
+                image_credit TEXT NOT NULL,
+                download_location TEXT,
+                rules_version INTEGER NOT NULL,
+                approved_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+
         # Usuario demo solo en desarrollo/tests: en producción sería una cuenta con contraseña pública
         cursor = conn.cursor()
         cursor.execute("SELECT id FROM users WHERE email = ?", ("demo@foodai.com",))
@@ -730,6 +744,7 @@ def reset_db():
     with get_connection() as conn:
         conn.execute("DELETE FROM shopping_items;")
         conn.execute("DELETE FROM recipes;")
+        conn.execute("DELETE FROM dish_photos;")
         conn.execute("DELETE FROM ingredients;")
         conn.execute("DELETE FROM users WHERE email != 'demo@foodai.com';")
         conn.commit()
@@ -1044,6 +1059,99 @@ def delete_saved_recipes_batch(recipe_ids: List[str], user_id: str) -> int:
         )
         conn.commit()
         return cursor.rowcount
+
+
+# ─── Caché persistente de fotos aprobadas por plato (Supabase Cloud + SQLite Fallback) ─────
+# Es solo un acelerador: si la base falla, la lectura devuelve None y la escritura se omite. Nunca rompe la generación.
+
+DISH_KEY_MAX_CHARS = 100
+
+
+def _clean_dish_key(value: Any) -> Optional[str]:
+    return value.strip()[:DISH_KEY_MAX_CHARS] if isinstance(value, str) and value.strip() else None
+
+
+def _valid_dish_photo(image_uri: Any, image_credit: Any, download_location: Any) -> Optional[Dict[str, Any]]:
+    """Valida con los saneadores de las recetas. `image_credit` puede ser dict o su JSON. None si algo no es válido."""
+    uri = _sanitize_image_uri(image_uri)
+    if isinstance(image_credit, str):
+        try:
+            image_credit = json.loads(image_credit)
+        except ValueError:
+            image_credit = None
+    credit_json = _sanitize_image_credit(image_credit)
+    if uri is None or credit_json is None:
+        return None
+    location = download_location if isinstance(download_location, str) and len(download_location) <= 2000 \
+        and _https_host_is(download_location, "api.unsplash.com") else None
+    return {"imageUri": uri, "imageCredit": json.loads(credit_json), "downloadLocation": location, "_credit_json": credit_json}
+
+
+def get_dish_photo(dish_key: str, rules_version: int) -> Optional[Dict[str, Any]]:
+    """Foto aprobada del plato con esa versión de la rúbrica: {imageUri, imageCredit, downloadLocation}, o None
+    (no existe, otra versión, datos inválidos o error de la base)."""
+    key = _clean_dish_key(dish_key)
+    if key is None:
+        return None
+    try:
+        sb = get_supabase()
+        if sb:
+            res = sb.table("dish_photos").select("*").eq("dish_key", key).eq("rules_version", rules_version).limit(1).execute()
+            row = res.data[0] if res.data else None
+        else:
+            with get_connection() as conn:
+                found = conn.execute(
+                    "SELECT image_uri, image_credit, download_location, rules_version FROM dish_photos WHERE dish_key = ?",
+                    (key,),
+                ).fetchone()
+            row = dict(found) if found else None
+        if not row or row.get("rules_version") != rules_version:
+            return None  # entrada de otra versión de la rúbrica: se ignora
+        valid = _valid_dish_photo(row.get("image_uri"), row.get("image_credit"), row.get("download_location"))
+        if valid is None:
+            return None
+        valid.pop("_credit_json")
+        return valid
+    except Exception as err:  # noqa: BLE001
+        logger.warning(f"[DB] No se pudo leer la caché de fotos de platos ({type(err).__name__}); se sigue sin ella.")
+        return None
+
+
+def save_dish_photo(
+    dish_key: str, image_uri: Any, image_credit: Any, download_location: Any, rules_version: int
+) -> bool:
+    """Guarda (o reemplaza) la foto aprobada del plato. True si se guardó; False si no era válida o la base falló."""
+    key = _clean_dish_key(dish_key)
+    valid = _valid_dish_photo(image_uri, image_credit, download_location)
+    if key is None or valid is None:
+        return False
+    record = {
+        "dish_key": key,
+        "image_uri": valid["imageUri"],
+        "image_credit": valid["_credit_json"],
+        "download_location": valid["downloadLocation"],
+        "rules_version": int(rules_version),
+    }
+    try:
+        sb = get_supabase()
+        if sb:
+            record["approved_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            sb.table("dish_photos").upsert(record, on_conflict="dish_key").execute()
+        else:
+            with get_connection() as conn:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO dish_photos
+                        (dish_key, image_uri, image_credit, download_location, rules_version, approved_at)
+                    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    """,
+                    (key, record["image_uri"], record["image_credit"], record["download_location"], record["rules_version"]),
+                )
+                conn.commit()
+        return True
+    except Exception as err:  # noqa: BLE001
+        logger.warning(f"[DB] No se pudo guardar la foto del plato ({type(err).__name__}); se sigue sin guardarla.")
+        return False
 
 
 # ─── Operaciones de Lista de Compras (Supabase Cloud + SQLite Fallback) ───────
