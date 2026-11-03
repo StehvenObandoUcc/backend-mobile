@@ -7,6 +7,7 @@ import uuid
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse
 from fastapi import HTTPException, status
+from app.core import photo_hosts
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,8 @@ def init_db():
             conn.execute("ALTER TABLE users ADD COLUMN auth_id TEXT;")
         if "email_verified" not in user_cols:
             conn.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0;")
+        if "sessions_valid_after" not in user_cols:
+            conn.execute("ALTER TABLE users ADD COLUMN sessions_valid_after INTEGER NOT NULL DEFAULT 0;")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_auth_id ON users(auth_id) WHERE auth_id IS NOT NULL;"
@@ -197,7 +200,7 @@ def init_db():
 
 # ─── Operaciones de Usuario (Supabase con fallback SQLite) ─────────────────────
 
-_USER_COLUMNS = "id, email, name, password_hash, auth_id, email_verified, created_at, updated_at"
+_USER_COLUMNS = "id, email, name, password_hash, auth_id, email_verified, sessions_valid_after, created_at, updated_at"
 
 
 def _normalize_user(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -300,6 +303,13 @@ def set_user_auth_link(user_id: str, auth_id: str) -> None:
 def set_user_password_hash(user_id: str, password_hash: str) -> None:
     """Reemplaza el hash de contraseña (p. ej. por el marcador "!supabase" al pasar a Supabase Auth)."""
     _update_user_fields(user_id, {"password_hash": password_hash}, "Error actualizando la contraseña en Supabase")
+
+
+def revoke_user_sessions(user_id: str) -> None:
+    """Invalida todas las sesiones emitidas hasta ahora (tokens con `iat` anterior). Se usa al cambiar la contraseña.
+    Requiere migrations/05_session_revocation.sql en Supabase."""
+    import time as _time
+    _update_user_fields(user_id, {"sessions_valid_after": int(_time.time())}, "Error revocando sesiones en Supabase")
 
 
 def set_user_email_verified(user_id: str, verified: bool) -> None:
@@ -747,6 +757,7 @@ def reset_db():
         conn.execute("DELETE FROM dish_photos;")
         conn.execute("DELETE FROM ingredients;")
         conn.execute("DELETE FROM users WHERE email != 'demo@foodai.com';")
+        conn.execute("UPDATE users SET sessions_valid_after = 0;")  # el demo vuelve a aceptar cualquier sesión
         conn.commit()
 
 
@@ -788,7 +799,8 @@ def _row_to_recipe_dict(row: Any) -> Dict[str, Any]:
     return d
 
 
-_IMAGE_CREDIT_KEYS = ("source", "name", "profileUrl", "sourceUrl")
+_IMAGE_CREDIT_KEYS = ("source", "name", "profileUrl", "sourceUrl", "license")
+_IMAGE_CREDIT_LICENSE_MAX_CHARS = 40
 
 
 def _https_host_is(value: Any, host: str) -> bool:
@@ -801,25 +813,39 @@ def _https_host_is(value: Any, host: str) -> bool:
 
 
 def _sanitize_image_uri(value: Any) -> Optional[str]:
-    """Acepta solo https://images.unsplash.com/... de hasta 2000 caracteres; cualquier otra cosa se descarta."""
-    if isinstance(value, str) and len(value) <= 2000 and _https_host_is(value, "images.unsplash.com"):
+    """Acepta solo https://images.unsplash.com/..., https://images.pexels.com/... o https://upload.wikimedia.org/...
+    (host exacto) de hasta 2000 caracteres; cualquier otra cosa se descarta."""
+    if isinstance(value, str) and len(value) <= 2000 and photo_hosts.is_image_url(value):
         return value
     return None
 
 
 def _sanitize_image_credit(value: Any) -> Optional[str]:
-    """Serializa el crédito de la foto a JSON conservando solo las claves conocidas (valores str ≤ 300)."""
+    """Serializa el crédito de la foto a JSON conservando solo las claves conocidas (valores str ≤ 300; license ≤ 40).
+
+    Los enlaces deben ser https a los hosts exactos de la fuente del crédito (unsplash por defecto; pexels y wikimedia
+    con los suyos); cualquier otro host se descarta. `license` solo se conserva en Wikimedia.
+    """
     if not isinstance(value, dict):
         return None
-    clean = {
-        k: value[k]
-        for k in _IMAGE_CREDIT_KEYS
-        if isinstance(value.get(k), str)
-        and value[k]
-        and len(value[k]) <= 300
-        and (k not in ("profileUrl", "sourceUrl") or _https_host_is(value[k], "unsplash.com"))
-    }
-    return json.dumps(clean) if clean else None
+    source = value.get("source") or "unsplash"  # sin source = Unsplash (créditos antiguos)
+    if not isinstance(source, str) or source not in photo_hosts.SOURCES:
+        return None  # source inválido: se descarta el crédito entero
+    clean = {"source": source}  # siempre normalizado
+    for k in _IMAGE_CREDIT_KEYS:
+        if k == "source":
+            continue
+        v = value.get(k)
+        if not isinstance(v, str) or not v or len(v) > 300:
+            continue
+        if k == "profileUrl" and not photo_hosts.is_author_url(v, source):
+            continue
+        if k == "sourceUrl" and not photo_hosts.is_page_url(v, source):
+            continue
+        if k == "license" and (source != "wikimedia" or len(v) > _IMAGE_CREDIT_LICENSE_MAX_CHARS):
+            continue
+        clean[k] = v
+    return json.dumps(clean) if len(clean) > 1 else None
 
 
 def get_saved_recipes_by_user(user_id: str) -> List[Dict[str, Any]]:
@@ -1082,8 +1108,12 @@ def _valid_dish_photo(image_uri: Any, image_credit: Any, download_location: Any)
     credit_json = _sanitize_image_credit(image_credit)
     if uri is None or credit_json is None:
         return None
+    if photo_hosts.source_of_image(uri) != json.loads(credit_json)["source"]:
+        return None  # la imagen debe venir del host de la fuente que dice el crédito
     location = download_location if isinstance(download_location, str) and len(download_location) <= 2000 \
         and _https_host_is(download_location, "api.unsplash.com") else None
+    if json.loads(credit_json)["source"] != "unsplash":
+        location = None  # solo Unsplash tiene downloadLocation
     return {"imageUri": uri, "imageCredit": json.loads(credit_json), "downloadLocation": location, "_credit_json": credit_json}
 
 
