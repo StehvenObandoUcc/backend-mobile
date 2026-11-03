@@ -76,7 +76,9 @@ def create_jwt_token(payload: Dict[str, Any], expires_in: int = JWT_EXPIRATION_S
     """Crea un token JWT RFC 7519 estándar usando HMAC-SHA256."""
     header = {"alg": JWT_ALGORITHM, "typ": "JWT"}
     payload_copy = dict(payload)
-    payload_copy["exp"] = int(time.time()) + expires_in
+    now = int(time.time())
+    payload_copy["iat"] = now  # emitido en: permite revocar sesiones anteriores a un cambio de contraseña
+    payload_copy["exp"] = now + expires_in
 
     header_b64 = _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
     payload_b64 = _b64url_encode(json.dumps(payload_copy, separators=(",", ":")).encode("utf-8"))
@@ -88,8 +90,12 @@ def create_jwt_token(payload: Dict[str, Any], expires_in: int = JWT_EXPIRATION_S
     return f"{header_b64}.{payload_b64}.{sig_b64}"
 
 
-def decode_jwt_token(token: str) -> Optional[Dict[str, Any]]:
-    """Decodifica y verifica la firma, algoritmo y expiración de un token JWT."""
+def decode_jwt_token(token: str, expired_grace_seconds: int = 0) -> Optional[Dict[str, Any]]:
+    """Decodifica y verifica la firma, algoritmo y expiración de un token JWT.
+
+    `expired_grace_seconds` > 0 SOLO para renovar la sesión: acepta un token vencido hace menos de ese plazo.
+    La firma y el algoritmo se verifican siempre igual; las rutas de datos usan 0 (sin gracia).
+    """
     try:
         parts = token.split(".")
         if len(parts) != 3:
@@ -110,8 +116,9 @@ def decode_jwt_token(token: str) -> Optional[Dict[str, Any]]:
             return None
 
         payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
-        if payload.get("exp", 0) < int(time.time()):
-            return None  # Token expirado
+        exp = payload.get("exp")
+        if not isinstance(exp, int) or exp + max(0, expired_grace_seconds) < int(time.time()):
+            return None  # Token expirado (o sin exp válido)
 
         return payload
     except Exception:
