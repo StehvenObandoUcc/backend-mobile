@@ -517,6 +517,30 @@ def test_forgot_and_reset_password_gives_token_and_new_login(gotrue):
     assert _login("olvido@test.com", "clave-larga-1").status_code == 401
 
 
+def test_reset_password_revokes_sessions_opened_before(gotrue):
+    """Cambiar la contraseña cierra las sesiones anteriores (p. ej. un teléfono perdido): ni sirven ni se renuevan."""
+    import time as _time
+    from unittest.mock import patch
+    from app.core.security import create_jwt_token
+
+    user = _registered_and_verified("robo@test.com", "clave-larga-1")["user"]
+    with patch("app.core.security.time.time", return_value=_time.time() - 120):
+        old = create_jwt_token({"sub": user["id"], "email": "robo@test.com"})
+    old_headers = {"Authorization": f"Bearer {old}"}
+    assert client.get("/api/v1/auth/me", headers=old_headers).status_code == 200
+
+    client.post("/api/v1/auth/forgot-password", json={"email": "robo@test.com"})
+    reset = client.post(
+        "/api/v1/auth/reset-password",
+        json={"email": "robo@test.com", "code": RECOVERY_CODE, "new_password": "clave-nueva-1"},
+    )
+    assert reset.status_code == 200
+    assert client.get("/api/v1/auth/me", headers=old_headers).status_code == 401
+    assert client.post("/api/v1/auth/refresh", headers=old_headers).status_code == 401
+    new_headers = {"Authorization": f"Bearer {reset.json()['access_token']}"}
+    assert client.get("/api/v1/auth/me", headers=new_headers).status_code == 200
+
+
 def test_forgot_password_old_account_keeps_old_password_until_reset(gotrue):
     _old_account("antiguo@test.com", "clave-vieja-1")
     res = client.post("/api/v1/auth/forgot-password", json={"email": "antiguo@test.com"})
