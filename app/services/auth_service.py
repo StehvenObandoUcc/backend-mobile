@@ -13,6 +13,7 @@ from app.core.db import (
     get_user_by_id,
     get_user_by_auth_id,
     create_user,
+    revoke_user_sessions,
     delete_user_account,
     set_user_auth_link,
     set_user_email_verified,
@@ -108,10 +109,19 @@ def _issue_token(user_record: Dict[str, Any]) -> TokenResponse:
         name=user_record["name"],
     )
     token = create_jwt_token({"sub": user_record["id"], "email": user_record["email"]})
+    # Misma duración que el token (antes estaba fija en 7 días aunque JWT_EXPIRATION_SECONDS cambiara).
     expires_at = datetime.datetime.fromtimestamp(
-        int(time.time()) + 60 * 60 * 24 * 7, tz=datetime.timezone.utc
+        int(time.time()) + settings.JWT_EXPIRATION_SECONDS, tz=datetime.timezone.utc
     ).isoformat()
     return TokenResponse(access_token=token, expires_at=expires_at, user=user_resp)
+
+
+def _session_revoked(payload: Dict[str, Any], user_record: Dict[str, Any]) -> bool:
+    """True si el token se emitió antes del último cambio de contraseña (sessions_valid_after).
+    Tokens antiguos sin `iat` cuentan como emitidos en 0: valen mientras no se haya revocado nada."""
+    issued_at = payload.get("iat") if isinstance(payload.get("iat"), int) else 0
+    valid_after = int(user_record.get("sessions_valid_after") or 0)
+    return issued_at < valid_after
 
 
 def _new_user_id() -> str:
@@ -269,7 +279,7 @@ class AuthService:
         if user_id:
             user_record = get_user_by_id(user_id)
 
-        if not user_record:
+        if not user_record or _session_revoked(payload, user_record):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Usuario no encontrado o sesión no válida.",
@@ -280,6 +290,25 @@ class AuthService:
             email=user_record["email"],
             name=user_record["name"],
         )
+
+    @staticmethod
+    def refresh_session(token: str) -> TokenResponse:
+        """Cambia un token válido, o vencido hace menos de SESSION_REFRESH_GRACE_SECONDS, por uno nuevo.
+
+        Seguridad: firma y algoritmo verificados; la cuenta debe existir (una cuenta eliminada no renueva);
+        el correo del token debe seguir siendo el de la cuenta; y un token emitido antes de un cambio de
+        contraseña no renueva. Cualquier fallo responde lo mismo para no dar pistas.
+        """
+        expired = _api_error(
+            status.HTTP_401_UNAUTHORIZED, "session_expired", "Tu sesión expiró. Vuelve a iniciar sesión."
+        )
+        payload = decode_jwt_token(token, expired_grace_seconds=settings.SESSION_REFRESH_GRACE_SECONDS)
+        if not payload or not isinstance(payload, dict) or not payload.get("sub"):
+            raise expired
+        user_record = get_user_by_id(payload["sub"])
+        if not user_record or user_record.get("email") != payload.get("email") or _session_revoked(payload, user_record):
+            raise expired
+        return _issue_token(user_record)
 
     # ─── Despachadores según AUTH_PROVIDER ─────────────────────────────────────
     @staticmethod
@@ -497,6 +526,11 @@ class AuthService:
             user = await _new_managed_user(req.email, auth_id, True)
         else:
             await _make_managed(user, auth_id, True)
+            # Contraseña nueva: las sesiones abiertas con la anterior (p. ej. un teléfono robado) dejan de valer.
+            try:
+                await _db(revoke_user_sessions, user["id"])
+            except Exception as err:  # sin la migración 05 no se puede revocar; el cambio de contraseña sigue
+                logger.error("[Auth] No se pudieron revocar las sesiones tras cambiar la contraseña: %s", err)
         _last_sent.pop(req.email, None)
         return _issue_token(user)
 
