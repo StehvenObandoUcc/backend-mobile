@@ -92,6 +92,21 @@ async def get_me(authorization: str = Header(None)) -> UserResponse:
     return await run_in_threadpool(AuthService.get_current_user_from_token, token)
 
 
+@router.post("/refresh", response_model=TokenResponse, status_code=status.HTTP_200_OK)
+async def refresh(request: Request, authorization: str = Header(None)) -> TokenResponse:
+    """Renueva la sesión: entrega un token nuevo a cambio del actual (vigente o vencido hace poco).
+    La app lo llama al abrirse y cuando el servidor rechaza un token, para no cerrar la sesión."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Falta header de autorización Bearer token.",
+        )
+    client_ip = get_client_ip(request)
+    await check_auth_rate_limit(f"refresh_{client_ip}", max_attempts_per_minute=30)
+    token = authorization.split("Bearer ")[1].strip()
+    return await run_in_threadpool(AuthService.refresh_session, token)
+
+
 @router.post("/delete-account", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_account(req: DeleteAccountRequest, request: Request, authorization: str = Header(None)) -> Response:
     """Elimina para siempre la cuenta del usuario autenticado y todos sus datos.
