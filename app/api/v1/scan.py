@@ -3,7 +3,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Tuple
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import ValidationError
@@ -24,6 +24,18 @@ _COLOMBIA_TZ = timezone(timedelta(hours=-5))
 
 def _today_colombia():
     return datetime.now(_COLOMBIA_TZ).date()
+
+
+def _resolve_expiration_with_source(item: dict, today) -> Tuple[Optional[str], str]:
+    """(fecha, origen): «label» si venía impresa en el empaque, «estimated» si es hoy + vida útil típica,
+    «unknown» si no hay fecha. La app distingue una fecha leída de una adivinada (seguridad alimentaria)."""
+    resolved = _resolve_expiration(item, today)
+    if resolved is None:
+        return None, "unknown"
+    printed = item.get("expirationDate")
+    if isinstance(printed, str) and printed[:10] == resolved:
+        return resolved, "label"
+    return resolved, "estimated"
 
 
 def _resolve_expiration(item: dict, today) -> Optional[str]:
@@ -183,21 +195,26 @@ async def _run_deepseek_vision(
 
         # Mapear ingredientes preservando nulls reales (sin inventar defaults)
         raw_ingredients = parsed.get("ingredients", [])
-        ingredients = [
-            IngredientItem(
-                id=f"ingredient-{i+1}",
-                name=str(item.get("name", "")).strip(),
-                category=item.get("category", "other"),
-                quantity=item.get("quantity"),      # None real si no se cuantificó
-                unit=item.get("unit"),              # None real si no se especificó
-                expirationDate=_resolve_expiration(item, _today_colombia()),
-                confidence=item.get("confidence"),  # None real si no hay score
-                source="ai",
-                confirmed=False,
+        today = _today_colombia()
+        ingredients = []
+        for i, item in enumerate(raw_ingredients):
+            if not (isinstance(item, dict) and item.get("name")):
+                continue
+            expiration, expiration_source = _resolve_expiration_with_source(item, today)
+            ingredients.append(
+                IngredientItem(
+                    id=f"ingredient-{i+1}",
+                    name=str(item.get("name", "")).strip(),
+                    category=item.get("category", "other"),
+                    quantity=item.get("quantity"),      # None real si no se cuantificó
+                    unit=item.get("unit"),              # None real si no se especificó
+                    expirationDate=expiration,
+                    expirationSource=expiration_source,
+                    confidence=item.get("confidence"),  # None real si no hay score
+                    source="ai",
+                    confirmed=False,
+                )
             )
-            for i, item in enumerate(raw_ingredients)
-            if isinstance(item, dict) and item.get("name")
-        ]
 
         # Validar contrato estricto de ScanResponse (is_food requerido sin default)
         result = ScanResponse(
