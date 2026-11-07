@@ -120,7 +120,7 @@ async def check_ai_rate_limit(client_identifier: str, max_per_minute: int = 5):
         calls.append(now)
 
 
-# ── Topes por usuario en ventana deslizante (en memoria, por proceso) ──
+# Topes por usuario en ventana deslizante (en memoria, por proceso)
 # Cada clave guarda SU propia ventana junto a sus entradas (token, instante): la poda usa la ventana de cada una,
 # así una búsqueda de 1 h nunca borra entradas de visión o recetas de 24 h.
 _user_quota: dict[tuple, tuple[float, deque]] = {}

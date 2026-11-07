@@ -147,7 +147,7 @@ def test_safe_id_strips_prompt_injection_characters():
     assert len(safe_id("a" * 500)) == 64
 
 
-# ── Integración con el servicio: la IA inventa un ingrediente -> reparación / reintento ──
+# Integración con el servicio: la IA inventa un ingrediente -> reparación / reintento
 class _FakeResponse:
     def __init__(self, payload):
         self._payload = payload
@@ -218,7 +218,7 @@ def test_service_gives_up_after_one_retry():
     assert len(client.prompts) == 2  # tope duro: 1 intento + 1 reintento
 
 
-# ── Caché anti-doble-clic: no debe mezclar usuarios ni ignorar «evitar» ──
+# Caché anti-doble-clic: no debe mezclar usuarios ni ignorar «evitar»
 def test_cache_key_is_per_user_and_includes_ids_and_avoid():
     from app.api.v1.recipes import recipe_cache_key
 
@@ -232,7 +232,7 @@ def test_cache_key_is_per_user_and_includes_ids_and_avoid():
     assert k != recipe_cache_key(RecipeGenerateRequest(ingredients=PANTRY, count=1, servings=4), "user-a", "es")
 
 
-# ── Fase 2 · pasos verificados ──
+# Fase 2 · pasos verificados
 from app.schemas.recipe import RecipeStepsRequest  # noqa: E402
 from app.services.recipe_verifier import verify_steps  # noqa: E402
 

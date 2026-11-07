@@ -146,7 +146,7 @@ def _old_account(email, password):
     return db.create_user("usr-old00001", email, "Antiguo", hash_password(password))
 
 
-# ─── Registro y verificación ───────────────────────────────────────────────────
+# Registro y verificación
 
 def test_register_then_verify_email_gives_working_token(gotrue):
     res = _register("nuevo@test.com", name="Chef Ana")
@@ -251,7 +251,7 @@ def test_verify_email_with_other_auth_id_is_conflict(gotrue):
     assert _code(res) == "account_conflict"
 
 
-# ─── Login ─────────────────────────────────────────────────────────────────────
+# Login
 
 def test_login_before_verifying_is_403_and_resends_code(gotrue):
     _register("sinverificar@test.com")
@@ -336,7 +336,7 @@ def test_supabase_marker_is_never_a_valid_password_hash():
     assert verify_password("cualquiera", "!supabase") is False
 
 
-# ─── Seguridad: toma de cuenta previa a la verificación ────────────────────────
+# Seguridad: toma de cuenta previa a la verificación
 
 def test_attacker_cannot_keep_password_chosen_at_registration(gotrue):
     """El atacante registra el correo de la víctima con SU clave X; la víctima verifica con la suya Y."""
@@ -394,7 +394,7 @@ def test_verify_conflict_is_checked_before_changing_password(gotrue):
     assert "update_password" not in gotrue.names()
 
 
-# ─── Reenvío de código y cooldown ──────────────────────────────────────────────
+# Reenvío de código y cooldown
 
 def test_resend_code_is_generic_and_only_sends_for_unverified(gotrue):
     _register("reenvio@test.com")
@@ -489,7 +489,7 @@ def test_login_sign_in_with_different_auth_id_is_conflict(gotrue):
     assert _code(res) == "account_conflict"
 
 
-# ─── Olvidé mi contraseña ──────────────────────────────────────────────────────
+# Olvidé mi contraseña
 
 def test_forgot_password_unknown_email_is_generic_without_sending(gotrue):
     _registered_and_verified("existe@test.com")
@@ -621,7 +621,7 @@ def test_reset_password_requires_min_8_chars():
     assert res.status_code == 422
 
 
-# ─── Borrado de cuenta ─────────────────────────────────────────────────────────
+# Borrado de cuenta
 
 def test_delete_account_supabase_removes_remote_then_local_user(gotrue):
     data = _registered_and_verified("borrar@test.com")
@@ -677,7 +677,7 @@ def test_token_of_deleted_account_does_not_enter_new_account_with_same_email(got
     assert client.get("/api/v1/auth/me", headers=new_headers).status_code == 200
 
 
-# ─── Errores de base de datos ──────────────────────────────────────────────────
+# Errores de base de datos
 
 def test_database_failure_in_supabase_flow_is_503_with_migration_hint(gotrue, monkeypatch, caplog):
     def broken(**_kwargs):
@@ -700,7 +700,7 @@ def test_duplicate_auth_id_integrity_error_is_409(gotrue, monkeypatch):
     assert _code(res) == "account_conflict"
 
 
-# ─── Validación 422 ────────────────────────────────────────────────────────────
+# Validación 422
 
 def test_validation_error_does_not_echo_the_submitted_password():
     res = client.post("/api/v1/auth/register", json={"email": "a@test.com", "password": "pwd-5"})
@@ -712,7 +712,7 @@ def test_validation_error_does_not_echo_the_submitted_password():
     assert "msg" in detail[0] and "type" in detail[0]
 
 
-# ─── Modo local ────────────────────────────────────────────────────────────────
+# Modo local
 
 def test_local_mode_new_endpoints_are_404_not_available():
     assert settings.AUTH_PROVIDER == "local"
@@ -743,7 +743,7 @@ def test_jwt_email_claim_no_longer_falls_back_to_email_lookup():
     assert res.status_code == 401
 
 
-# ─── Configuración ─────────────────────────────────────────────────────────────
+# Configuración
 
 def test_auth_provider_invalid_value_falls_back_to_local(monkeypatch):
     from app.core.config import _resolve_auth_provider
@@ -782,7 +782,7 @@ def test_production_refuses_supabase_auth_without_credentials(monkeypatch):
             pass
 
 
-# ─── Cliente GoTrue: mapeo de errores con respuestas falsas de httpx ───────────
+# Cliente GoTrue: mapeo de errores con respuestas falsas de httpx
 
 @pytest.fixture
 def gotrue_url(monkeypatch):

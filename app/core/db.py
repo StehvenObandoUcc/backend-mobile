@@ -44,7 +44,7 @@ def get_supabase():
     return _supabase_client
 
 
-# ─── SQLite Fallback (para desarrollo offline y testing) ───────────────────────
+# SQLite Fallback (para desarrollo offline y testing)
 
 import threading
 
@@ -198,7 +198,7 @@ def init_db():
         conn.commit()
 
 
-# ─── Operaciones de Usuario (Supabase con fallback SQLite) ─────────────────────
+# Operaciones de Usuario (Supabase con fallback SQLite)
 
 _USER_COLUMNS = "id, email, name, password_hash, auth_id, email_verified, sessions_valid_after, created_at, updated_at"
 
@@ -395,7 +395,7 @@ def delete_user_account(user_id: str) -> None:
         conn.commit()
 
 
-# ─── Operaciones de Inventario (CRUD con persistencia y preservación de campos) ─
+# Operaciones de Inventario (CRUD con persistencia y preservación de campos)
 
 def _row_to_ingredient_dict(row: Any) -> Dict[str, Any]:
     """Mapea una fila SQLite o Supabase al formato canónico conservando todos los campos."""
@@ -761,7 +761,7 @@ def reset_db():
         conn.commit()
 
 
-# ─── Operaciones de Recetas Guardadas (Supabase Cloud + SQLite Fallback) ──────
+# Operaciones de Recetas Guardadas (Supabase Cloud + SQLite Fallback)
 
 def _row_to_recipe_dict(row: Any) -> Dict[str, Any]:
     """Mapea una fila de base de datos a formato Recipe canónico parseando campos serializados."""
@@ -1087,7 +1087,7 @@ def delete_saved_recipes_batch(recipe_ids: List[str], user_id: str) -> int:
         return cursor.rowcount
 
 
-# ─── Caché persistente de fotos aprobadas por plato (Supabase Cloud + SQLite Fallback) ─────
+# Caché persistente de fotos aprobadas por plato (Supabase Cloud + SQLite Fallback)
 # Es solo un acelerador: si la base falla, la lectura devuelve None y la escritura se omite. Nunca rompe la generación.
 
 DISH_KEY_MAX_CHARS = 100
@@ -1184,7 +1184,7 @@ def save_dish_photo(
         return False
 
 
-# ─── Operaciones de Lista de Compras (Supabase Cloud + SQLite Fallback) ───────
+# Operaciones de Lista de Compras (Supabase Cloud + SQLite Fallback)
 
 def _row_to_shopping_dict(row: Any) -> Dict[str, Any]:
     """Mapea una fila de base de datos a formato ShoppingItem canónico."""

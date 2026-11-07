@@ -46,7 +46,7 @@ def ensure_users():
             pass
 
 
-# ─── INVENTORY TESTS ─────────────────────────────────────────────────────────
+# INVENTORY TESTS
 
 def test_inventory_http_endpoints_status_codes():
     """Valida la matriz completa de códigos HTTP para POST /api/v1/inventory:
@@ -135,7 +135,7 @@ def test_inventory_concurrent_creates_same_id_and_user():
     db.delete_ingredient(item_id, USER_A_ID)
 
 
-# ─── SHOPPING TESTS ──────────────────────────────────────────────────────────
+# SHOPPING TESTS
 
 def test_shopping_http_endpoints_status_codes():
     """Valida la matriz completa de códigos HTTP para POST /api/v1/shopping:
