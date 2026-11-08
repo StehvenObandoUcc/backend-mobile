@@ -642,7 +642,6 @@ def update_ingredient(ingredient_id: str, user_id: str, updates: Dict[str, Any])
 
     now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
 
-    # Mapeo de campos a actualizar
     field_mapping = {
         "name": updates.get("name"),
         "category": updates.get("category"),
@@ -771,7 +770,6 @@ def _row_to_recipe_dict(row: Any) -> Dict[str, Any]:
     d["isSaved"] = bool(d.get("is_saved", d.get("isSaved", True)))
     d["isPrepared"] = bool(d.get("is_prepared", d.get("isPrepared", False)))
 
-    # Parsear colecciones JSON
     for key, alt in [("availableIngredients", "available_ingredients"), ("missingIngredients", "missing_ingredients"), ("steps", "steps")]:
         raw = d.get(key) if key in d else d.get(alt)
         if isinstance(raw, str):

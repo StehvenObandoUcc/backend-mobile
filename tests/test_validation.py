@@ -77,7 +77,6 @@ def test_ingredient_item_rejects_out_of_range_year():
 
 
 def test_auth_register_validations():
-    # Valid
     req = RegisterRequest(
         email="test@foodai.com",
         password="secretpassword123",
@@ -86,32 +85,25 @@ def test_auth_register_validations():
     assert req.email == "test@foodai.com"
     assert req.name == "Chef Maria"
 
-    # Invalid email
     with pytest.raises(ValidationError):
         RegisterRequest(email="correo-invalido", password="secretpassword123")
 
-    # Short password (< 6)
     with pytest.raises(ValidationError):
         RegisterRequest(email="test@foodai.com", password="123")
 
-    # Name too short (< 2)
     with pytest.raises(ValidationError):
         RegisterRequest(email="test@foodai.com", password="secretpassword123", name="A")
 
-    # Name too long (> 50)
     with pytest.raises(ValidationError):
         RegisterRequest(email="test@foodai.com", password="secretpassword123", name="A" * 51)
 
 
 def test_auth_login_validations():
-    # Valid
     req = LoginRequest(email="demo@foodai.com", password="123456")
     assert req.email == "demo@foodai.com"
 
-    # Invalid email
     with pytest.raises(ValidationError):
         LoginRequest(email="bademail", password="123456")
 
-    # Short password
     with pytest.raises(ValidationError):
         LoginRequest(email="demo@foodai.com", password="123")

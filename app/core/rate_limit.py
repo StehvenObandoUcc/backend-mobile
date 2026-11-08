@@ -14,10 +14,7 @@ _calls = deque()
 ESTIMATED_COST_PER_CALL_USD = 0.00015
 _total_calls = 0
 
-# NOTA DE PRODUCCIÓN (Multi-worker):
-# Este rate limiter opera in-memory por proceso (instancia de worker).
-# En entornos con múltiples workers de Uvicorn/Gunicorn en cluster, se recomienda
-# conectar a Redis si se requiere un contador estrictamente unificado entre procesos.
+# El límite es en memoria y por proceso: con varios workers haría falta Redis para un contador unificado.
 
 
 def get_client_ip(request: Request) -> str:

@@ -45,7 +45,6 @@ def test_register_and_get_profile():
     assert "expires_at" in data
     assert data["user"]["email"] == email
 
-    # Verificar /me con el token
     me_resp = client.get(
         "/api/v1/auth/me",
         headers={"Authorization": f"Bearer {token}"},

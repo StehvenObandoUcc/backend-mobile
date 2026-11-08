@@ -85,7 +85,6 @@ class TestSupabaseRLSSecurity:
         test_user_id = f"usr-rls-regress-{suffix}"
         test_item_id = f"shop-rls-regress-{suffix}"
 
-        # 1. Crear usuario legítimo con service_role
         service.table("users").insert({
             "id": test_user_id,
             "email": f"rls_test_{suffix}@foodai.test",
@@ -94,7 +93,6 @@ class TestSupabaseRLSSecurity:
         }).execute()
 
         try:
-            # 2. Inserción con service_role
             res_insert = service.table("shopping_items").insert({
                 "id": test_item_id,
                 "user_id": test_user_id,
@@ -103,12 +101,10 @@ class TestSupabaseRLSSecurity:
             assert len(res_insert.data) == 1
             assert res_insert.data[0]["id"] == test_item_id
 
-            # 3. Lectura con service_role
             res_read = service.table("shopping_items").select("*").eq("id", test_item_id).execute()
             assert len(res_read.data) == 1
             assert res_read.data[0]["name"] == "Articulo Regresion RLS"
 
-            # 4. Anon no debe ver el registro de shopping_items ni el usuario
             res_anon_item = anon.table("shopping_items").select("*").eq("id", test_item_id).execute()
             assert len(res_anon_item.data) == 0, "Anon key fue capaz de leer el articulo creado por service_role!"
 
@@ -116,7 +112,6 @@ class TestSupabaseRLSSecurity:
             assert len(res_anon_user.data) == 0, "Anon key fue capaz de leer el usuario creado por service_role!"
 
         finally:
-            # 5. Limpieza garantizada
             try:
                 service.table("shopping_items").delete().eq("id", test_item_id).execute()
                 service.table("users").delete().eq("id", test_user_id).execute()

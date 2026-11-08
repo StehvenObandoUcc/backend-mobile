@@ -109,7 +109,7 @@ def _issue_token(user_record: Dict[str, Any]) -> TokenResponse:
         name=user_record["name"],
     )
     token = create_jwt_token({"sub": user_record["id"], "email": user_record["email"]})
-    # Misma duración que el token (antes estaba fija en 7 días aunque JWT_EXPIRATION_SECONDS cambiara).
+    # Misma duración que el token.
     expires_at = datetime.datetime.fromtimestamp(
         int(time.time()) + settings.JWT_EXPIRATION_SECONDS, tz=datetime.timezone.utc
     ).isoformat()
@@ -219,7 +219,6 @@ async def _discard_unfinished_signup(user: Optional[Dict[str, Any]], auth_id: st
 
 
 class AuthService:
-    # Modo local (comportamiento original)
     @staticmethod
     def register(req: RegisterRequest) -> TokenResponse:
         email = req.email.strip().lower()
@@ -310,7 +309,6 @@ class AuthService:
             raise expired
         return _issue_token(user_record)
 
-    # Despachadores según AUTH_PROVIDER
     @staticmethod
     def is_supabase() -> bool:
         return settings.AUTH_PROVIDER == "supabase"
@@ -338,7 +336,6 @@ class AuthService:
         if not AuthService.is_supabase():
             raise _api_error(status.HTTP_404_NOT_FOUND, "not_available", "Esta función no está disponible.")
 
-    # Modo supabase
     @staticmethod
     async def register_supabase(req: RegisterRequest, http=None) -> VerificationRequiredResponse:
         email = req.email.strip().lower()

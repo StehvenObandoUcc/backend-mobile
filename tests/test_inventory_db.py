@@ -50,7 +50,6 @@ def test_create_and_preserve_all_fields_in_db():
     item_id = created_data["id"]
     assert item_id.startswith("ing-")
 
-    # 1. Comprobar que la respuesta contiene todos los campos intactos
     assert created_data["name"] == payload["name"]
     assert created_data["category"] == payload["category"]
     assert created_data["quantity"] == payload["quantity"]
@@ -65,7 +64,6 @@ def test_create_and_preserve_all_fields_in_db():
     assert "createdAt" in created_data
     assert "updatedAt" in created_data
 
-    # 2. Comprobar directamente en la base de datos (Query física SQL)
     db_record = db.get_ingredient_by_id(item_id, USER_1_ID)
     assert db_record is not None
     assert db_record["id"] == item_id
@@ -85,7 +83,6 @@ def test_create_and_preserve_all_fields_in_db():
 
 def test_update_ingredient_effectively_in_db():
     """Auditoría: Verifica que al actualizar un alimento, los cambios se guarden en la BD y se preserve el resto."""
-    # 1. Crear alimento inicial
     initial = {
         "name": "Leche Entera",
         "category": "dairy",
@@ -101,7 +98,6 @@ def test_update_ingredient_effectively_in_db():
     assert create_res.status_code == 201
     item_id = create_res.json()["id"]
 
-    # 2. Actualizar solo la cantidad, fecha de vencimiento y notas
     updates = {
         "quantity": 1,
         "expirationDate": "2026-10-05",
@@ -120,7 +116,6 @@ def test_update_ingredient_effectively_in_db():
     assert updated_data["unit"] == "liters"
     assert updated_data["confidence"] == 0.90
 
-    # 3. Verificar directamente en la base de datos
     db_item = db.get_ingredient_by_id(item_id, USER_1_ID)
     assert db_item is not None
     assert float(db_item["quantity"]) == 1.0
@@ -132,7 +127,6 @@ def test_update_ingredient_effectively_in_db():
 
 def test_delete_ingredient_effectively_in_db():
     """Auditoría: Verifica que al borrar un alimento, este desaparezca físicamente de la base de datos."""
-    # 1. Crear alimento
     create_res = client.post(
         "/api/v1/inventory",
         json={"name": "Yogurt de Frutilla", "category": "dairy", "quantity": 1, "unit": "units"},
@@ -144,19 +138,15 @@ def test_delete_ingredient_effectively_in_db():
     # Confirmar que existe en la BD
     assert db.get_ingredient_by_id(item_id, USER_1_ID) is not None
 
-    # 2. Borrar alimento vía DELETE endpoint
     delete_res = client.delete(f"/api/v1/inventory/{item_id}", headers=AUTH_HEADER_1)
     assert delete_res.status_code == 200
     assert delete_res.json()["status"] == "deleted"
 
-    # 3. Verificar que YA NO existe en la base de datos
     assert db.get_ingredient_by_id(item_id, USER_1_ID) is None
 
-    # 4. Intentar borrarlo de nuevo debe devolver 404
     delete_again = client.delete(f"/api/v1/inventory/{item_id}", headers=AUTH_HEADER_1)
     assert delete_again.status_code == 404
 
-    # 5. Intentar actualizar el ítem borrado debe devolver 404
     update_deleted = client.put(
         f"/api/v1/inventory/{item_id}",
         json={"quantity": 5},
@@ -227,7 +217,6 @@ def test_multi_user_isolation_for_delete_and_update():
 
 def test_input_validation_and_database_rejection():
     """Auditoría: Validaciones estrictas previenen corrupción de datos en la base de datos."""
-    # 1. Cantidad negativa rechazada
     bad_qty = client.post(
         "/api/v1/inventory",
         json={"name": "Pollo", "quantity": -5},
@@ -235,7 +224,6 @@ def test_input_validation_and_database_rejection():
     )
     assert bad_qty.status_code == 422
 
-    # 2. Nombre vacío rechazado
     empty_name = client.post(
         "/api/v1/inventory",
         json={"name": "   ", "quantity": 1},
@@ -243,7 +231,6 @@ def test_input_validation_and_database_rejection():
     )
     assert empty_name.status_code == 422
 
-    # 3. Fecha con formato inválido rechazada
     bad_date = client.post(
         "/api/v1/inventory",
         json={"name": "Yogurt", "expirationDate": "31-12-2026"},
@@ -254,16 +241,13 @@ def test_input_validation_and_database_rejection():
 
 def test_inventory_requires_valid_bearer_token():
     """Auditoría de Seguridad (S1): Peticiones anónimas o con tokens corruptos deben devolver 401 Unauthorized."""
-    # 1. Petición sin header Authorization
     no_auth = client.get("/api/v1/inventory")
     assert no_auth.status_code == 401
     assert "Se requiere autenticación" in no_auth.json()["detail"]
 
-    # 2. Petición con token falso/corrupto
     bad_token = client.get("/api/v1/inventory", headers={"Authorization": "Bearer token-falso-invalido"})
     assert bad_token.status_code == 401
 
-    # 3. Intento de creación sin autenticación
     no_auth_create = client.post("/api/v1/inventory", json={"name": "Alimento Anónimo"})
     assert no_auth_create.status_code == 401
 

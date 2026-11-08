@@ -15,7 +15,6 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
-# Errores tipados
 
 class SupabaseAuthError(Exception):
     """Error base de Supabase Auth. `code` es el error_code de GoTrue (o uno interno)."""
@@ -58,7 +57,6 @@ class AuthUnavailable(SupabaseAuthError):
     pass
 
 
-# Mapeo de respuestas de GoTrue
 
 def _extract(body: Any) -> Tuple[str, str]:
     """Devuelve (código, mensaje) en minúsculas desde ambos formatos de error de GoTrue."""
@@ -103,7 +101,6 @@ def _map_error(status_code: int, body: Any, path: str) -> SupabaseAuthError:
     return SupabaseAuthError(label, status_code)
 
 
-# Transporte
 
 def _base_url() -> str:
     return f"{settings.SUPABASE_URL}/auth/v1"
@@ -167,7 +164,6 @@ def _user_id(body: Any) -> str:
     raise AuthUnavailable("invalid_response")
 
 
-# Operaciones
 
 async def sign_up(email: str, password: str, name: str, http_client: Optional[httpx.AsyncClient] = None) -> str:
     body = await _request(

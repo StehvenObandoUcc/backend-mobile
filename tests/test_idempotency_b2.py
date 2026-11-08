@@ -99,7 +99,6 @@ def test_inventory_http_endpoints_status_codes():
     res5 = client.post("/api/v1/inventory", json=invalid_payload, headers=AUTH_HEADER_A)
     assert res5.status_code == 422
 
-    # Limpieza
     db.delete_ingredient(item_id, USER_A_ID)
 
 
@@ -131,7 +130,6 @@ def test_inventory_concurrent_creates_same_id_and_user():
     matches = [x for x in list_res.json() if x["id"] == item_id]
     assert len(matches) == 1
 
-    # Limpieza
     db.delete_ingredient(item_id, USER_A_ID)
 
 
@@ -188,7 +186,6 @@ def test_shopping_http_endpoints_status_codes():
     res5 = client.post("/api/v1/shopping", json=invalid_payload, headers=AUTH_HEADER_A)
     assert res5.status_code == 422
 
-    # Limpieza
     db.delete_shopping_item(item_id, USER_A_ID)
 
 
@@ -220,7 +217,6 @@ def test_shopping_concurrent_creates_same_id_and_user():
     matches = [x for x in list_res.json() if x["id"] == item_id]
     assert len(matches) == 1
 
-    # Limpieza
     db.delete_shopping_item(item_id, USER_A_ID)
 
 
@@ -259,5 +255,4 @@ def test_db_layer_idempotency_preserves_created_at_and_user():
         db.create_ingredient({"id": item_id, "name": "Romero Seco", "category": "vegetable"}, user_id=USER_B_ID)
     assert exc_user.value.status_code == 409
 
-    # Limpieza
     db.delete_ingredient(item_id, USER_A_ID)

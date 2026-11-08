@@ -51,14 +51,11 @@ class Settings:
     API_V1_STR: str = "/api/v1"
     CORS_ORIGINS: List[str] = ["*"]
 
-    # Security & Auth
     DEFAULT_INSECURE_SECRET: str = "food-ai-secret-key-change-in-production-123456"
     JWT_SECRET: str = os.getenv("JWT_SECRET", DEFAULT_INSECURE_SECRET)
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     JWT_EXPIRATION_SECONDS: int = int(os.getenv("JWT_EXPIRATION_SECONDS", str(60 * 60 * 24 * 7)))
-    # Renovación de sesión (POST /auth/refresh): un token vencido hace menos de este plazo todavía se puede
-    # cambiar por uno nuevo. Así la sesión no se cierra mientras la persona abra la app al menos una vez en
-    # ese tiempo. Pasado el plazo hay que volver a iniciar sesión.
+    # POST /auth/refresh: un token vencido hace menos de este plazo aún se canjea por uno nuevo; pasado el plazo hay que iniciar sesión.
     SESSION_REFRESH_GRACE_SECONDS: int = int(os.getenv("SESSION_REFRESH_GRACE_SECONDS", str(60 * 60 * 24 * 60)))
 
     def is_production_secure(self) -> bool:
@@ -71,7 +68,6 @@ class Settings:
     def is_production(self) -> bool:
         return self.APP_ENV == "production"
 
-    # Database
     DATABASE_PATH: str = os.getenv(
         "DATABASE_PATH",
         os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "app.db"),
@@ -91,7 +87,6 @@ class Settings:
     # Opcional: clave pública (anon) para las llamadas de usuario a Supabase Auth; /admin siempre usa SUPABASE_KEY
     SUPABASE_ANON_KEY: str = os.getenv("SUPABASE_ANON_KEY", "").strip()
 
-    # AI Config (DeepSeek)
     AI_PROVIDER: str = os.getenv("AI_PROVIDER", "deepseek")
     # Sin DEEPSEEK_API_KEY no se cae en silencio a otra clave (GEMINI_API_KEY es de otro proveedor).
     DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "").strip()
@@ -101,9 +96,8 @@ class Settings:
     DEEPSEEK_TIMEOUT_SECONDS: float = float(os.getenv("DEEPSEEK_TIMEOUT_SECONDS", "45"))
     MAX_CALLS_PER_MINUTE: int = int(os.getenv("MAX_CALLS_PER_MINUTE", "5"))
 
-    # Foto real verificada de cada receta, buscada EN VIVO en varias fuentes gratis (sin banco de fotos):
-    # Unsplash (modo demo, 50 búsquedas/hora para toda la app) -> Pexels (clave gratis) -> Wikimedia Commons (sin clave).
-    # Una fuente sin su dato (clave o contacto) queda desactivada; sin ninguna fuente las recetas salen sin foto.
+    # Foto de receta buscada en vivo: Unsplash (demo, 50 búsquedas/hora para toda la app) -> Pexels -> Wikimedia.
+    # Una fuente sin clave o contacto queda desactivada; sin ninguna, las recetas salen sin foto.
     UNSPLASH_ACCESS_KEY: str = os.getenv("UNSPLASH_ACCESS_KEY", "").strip()
     UNSPLASH_APP_NAME: str = os.getenv("UNSPLASH_APP_NAME", "food_ai_assistant").strip() or "food_ai_assistant"
     PEXELS_API_KEY: str = os.getenv("PEXELS_API_KEY", "").strip()
@@ -118,8 +112,8 @@ class Settings:
     PHOTO_TIME_BUDGET_SECONDS: float = _float_env("PHOTO_TIME_BUDGET_SECONDS", 30.0)
     # Máximo de llamadas de visión por receta (en total, sumando todas las fuentes)
     PHOTO_MAX_VISION_PER_RECIPE: int = int(_float_env("PHOTO_MAX_VISION_PER_RECIPE", 3))
-    # Topes por usuario (en memoria): protegen las cuotas compartidas de toda la app contra un solo usuario.
-    # UNSPLASH_PER_USER_HOURLY es el nombre antiguo de PHOTO_SEARCH_PER_USER_HOURLY (búsquedas de fotos por hora, todas las fuentes).
+    # Topes por usuario (en memoria): protegen las cuotas compartidas contra un solo usuario.
+    # UNSPLASH_PER_USER_HOURLY es el nombre antiguo de PHOTO_SEARCH_PER_USER_HOURLY.
     PHOTO_SEARCH_PER_USER_HOURLY: int = int(_float_env(
         "PHOTO_SEARCH_PER_USER_HOURLY", _float_env("UNSPLASH_PER_USER_HOURLY", 20)
     ))

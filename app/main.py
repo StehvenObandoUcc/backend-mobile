@@ -35,10 +35,8 @@ async def lifespan(app: FastAPI):
             "los flujos de autenticación responderán 503."
         )
 
-    # Inicialización controlada de base de datos en el ciclo de vida de la aplicación
     init_db()
 
-    # Verificaciones diagnósticas de preparación para despliegue
     if not settings.is_production_secure():
         logger.warning(
             "[DESPLIEGUE] JWT_SECRET está utilizando el valor inseguro por defecto. "
